@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>自动消防小车 · 城市仿真控制台</title>
+<style>
+  :root{
+    --bg:#0a1220; --panel:#111c2e; --panel2:#0e1727; --line:#1e2f4a;
+    --txt:#e6edf7; --muted:#8fa3bf; --accent:#38bdf8;
+    --green:#22c55e; --amber:#f59e0b; --red:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:18px;background:radial-gradient(1200px 700px at 30% -10%,#12233d 0%,var(--bg) 55%);
+    color:var(--txt);font-family:"Microsoft YaHei","Segoe UI",sans-serif;
+  }
+  .layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:16px;max-width:1520px;margin:0 auto}
+  .stage{min-width:0}
+  .stage-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:2px 4px 10px}
+  .stage-head h1{font-size:19px;margin:0;letter-spacing:.5px}
+  .stage-head h1 span{color:var(--muted);font-size:12.5px;font-weight:400;margin-left:8px}
+  .clock{font-family:Consolas,monospace;font-size:13px;color:var(--muted);white-space:nowrap}
+  .clock b{color:var(--accent)}
+  .canvas-wrap{position:relative;border-radius:16px;overflow:hidden;border:1px solid var(--line);
+    box-shadow:0 18px 50px rgba(0,0,0,.45);background:#0d1727}
+  canvas{display:block;width:100%;height:auto}
+  .hud{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:10px;margin-top:10px}
+  .hud .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+  .hud .label{font-size:11.5px;color:var(--muted);margin-bottom:4px}
+  .hud .value{font-size:15px;font-weight:600}
+  .bar{height:9px;border-radius:6px;background:#1c2c45;overflow:hidden;margin-top:7px}
+  .bar > i{display:block;height:100%;width:100%;background:linear-gradient(90deg,#0ea5e9,#22d3ee);transition:width .25s}
+  .bar.low > i{background:linear-gradient(90deg,#f59e0b,#ef4444)}
+  aside{display:flex;flex-direction:column;gap:12px;min-width:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 13px}
+  .card h3{margin:0 0 9px;font-size:13px;letter-spacing:.4px;color:#c9d8ec;display:flex;justify-content:space-between;align-items:center}
+  .badge{font-size:10.5px;padding:2px 8px;border-radius:20px;background:#1c2c45;color:var(--muted);font-weight:400}
+  .badge.ok{background:rgba(34,197,94,.15);color:#4ade80}
+  .badge.fail{background:rgba(239,68,68,.15);color:#f87171}
+  .badge.run{background:rgba(56,189,248,.15);color:#38bdf8}
+  .progress{height:7px;border-radius:5px;background:#1c2c45;overflow:hidden;margin:2px 0 10px}
+  .progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,#38bdf8,#818cf8);transition:width .2s}
+  .steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
+  .steps li{display:flex;align-items:center;gap:7px;font-size:11.5px;padding:4px 7px;border-radius:8px;background:var(--panel2)}
+  .steps .dot{width:9px;height:9px;border-radius:50%;background:#334155;flex:none}
+  .steps li.running .dot{background:#38bdf8;animation:pulse 1s infinite}
+  .steps li.pass .dot{background:var(--green)}
+  .steps li.fail .dot{background:var(--red)}
+  .steps .name{width:76px;flex:none;color:#cbd8ea}
+  .steps .detail{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .steps li.fail .detail{color:#f87171}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,.5)}50%{box-shadow:0 0 0 5px rgba(56,189,248,0)}}
+  .actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .actions button{border:0;border-radius:9px;padding:9px 6px;font-size:12.5px;color:#fff;cursor:pointer;font-family:inherit;transition:transform .08s,filter .15s}
+  .actions button:active{transform:scale(.97)}
+  .actions button:hover{filter:brightness(1.12)}
+  .b-fire{background:#dc2626}.b-fault{background:#d97706}.b-check{background:#0284c7}
+  .b-block{background:#7c3aed}.b-reset{background:#334155}
+  .alerts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:150px;overflow:auto}
+  .alerts li{font-size:12px;line-height:1.45;padding:6px 8px;border-radius:8px;background:var(--panel2);border-left:3px solid #334155;color:#b9c9de}
+  .alerts li.critical{border-color:var(--red);color:#fca5a5}
+  .alerts li.warning{border-color:var(--amber);color:#fcd34d}
+  .alerts li.info{border-color:var(--accent);color:#7dd3fc}
+  .alerts li.success{border-color:var(--green);color:#86efac}
+  .events{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;max-height:190px;overflow:auto}
+  .events li{font-size:11.5px;line-height:1.45;color:#93a7c2;display:flex;gap:7px}
+  .events li time{color:#526b8d;font-family:Consolas,monospace;flex:none}
+  .events li.critical{color:#f87171}.events li.warning{color:#fbbf24}.events li.success{color:#4ade80}
+  .legend{font-size:11.5px;color:var(--muted);line-height:1.8}
+  .legend b{color:#cbd8ea;font-weight:600}
+  .legend .emoji{font-family:"Segoe UI Emoji","Apple Color Emoji",sans-serif}
+  @media (max-width:1080px){
+    .layout{grid-template-columns:1fr}
+    .hud{grid-template-columns:1fr 1fr 1fr}
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <section class="stage">
+    <div class="stage-head">
+      <h1>🚒 自动消防小车 · 城市仿真<span>连续路网 / 行人交通规则 / 机械臂清障 / 全车自检</span></h1>
+      <div class="clock">仿真 <b id="clock">0.0s</b> ｜ 信号灯 <b id="signal">--</b></div>
+    </div>
+    <div class="canvas-wrap"><canvas id="cv" width="1000" height="740"></canvas></div>
+    <div class="hud">
+      <div class="box">
+        <div class="label">水箱水量</div>
+        <div class="value" id="waterText">100%</div>
+        <div class="bar" id="waterBar"><i style="width:100%"></i></div>
+      </div>
+      <div class="box">
+        <div class="label">车辆状态</div>
+        <div class="value" id="stateText">待命</div>
+        <div class="label" style="margin-top:5px" id="speedText">速度 0.0</div>
+      </div>
+      <div class="box">
+        <div class="label">任务统计</div>
+        <div class="value" id="statsText" style="font-size:12.5px;line-height:1.6">—</div>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h3>全车自检 <span class="badge" id="checkBadge">未开始</span></h3>
+      <div class="progress"><i id="checkBar"></i></div>
+      <ul class="steps" id="checkSteps"></ul>
+    </div>
+
+    <div class="card">
+      <h3>演示操作</h3>
+      <div class="actions">
+        <button class="b-fire" onclick="post('/api/fire')">🔥 模拟火情</button>
+        <button class="b-fault" onclick="post('/api/fault')">🛠 注入故障</button>
+        <button class="b-check" onclick="post('/api/selfcheck')">🔍 立即自检</button>
+        <button class="b-block" onclick="post('/api/obstacle?ahead=true')">🚧 前方放路障</button>
+        <button class="b-reset" style="grid-column:1 / -1" onclick="resetSim()">↻ 重置仿真</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>实时告警</h3>
+      <ul class="alerts" id="alerts"><li class="info">连接中…</li></ul>
+    </div>
+
+    <div class="card">
+      <h3>事件记录</h3>
+      <ul class="events" id="events"></ul>
+    </div>
+
+    <div class="card legend">
+      <b>图例：</b><span class="emoji">🚒</span> 消防车　<span class="emoji">🚶</span> 行人　<span class="emoji">🔥</span> 火情　<span class="emoji">🚧</span> 路障<br>
+      <span class="emoji">💧</span> 补水站　<span class="emoji">🔧</span> 维修站　信号灯：左点 N=南北，右点 E=东西<br>
+      <b>规则：</b>行人只走人行道与斑马线；红灯在路口等待；小车遇行人降速，遇路障停车用机械臂移除。
+    </div>
+  </aside>
+</div>
+
+<script>
+/* ============================================================ 常量与工具 */
+const W = 1000, H = 740;
+const COLORS = {
+  bg:'#0d1727', block:'#152238', road:'#2a3447', roadEdge:'#3a4760',
+  walk:'#41516b', lane:'#b7c4d8', cross:'#e8eef7',
+  building:'#1c3454', window:'#f6c76a', tree:'#2f7d4f'
+};
+const STATE_NAMES = {
+  idle:'待命', self_check:'全车自检中', to_fire:'赶赴火场', extinguishing:'喷水灭火中',
+  to_refill:'前往补水站', refilling:'补水 / 充电中', to_repair:'前往维修站', repairing:'维修中'
+};
+const EMOJI_FONT = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let city = null;
+let staticMap = null;
+let prevState = null, curState = null;
+let prevStamp = 0, curStamp = 0;
+
+const $ = id => document.getElementById(id);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+function lerp(a,b,t){ return a + (b-a)*t; }
+function lerpAngle(a,b,t){
+  let d = ((b-a+Math.PI) % (Math.PI*2) + Math.PI*2) % (Math.PI*2) - Math.PI;
+  return a + d*t;
+}
+function roundRect(g,x,y,w,h,r){
+  r = Math.min(r, w/2, h/2);
+  g.beginPath();
+  g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r);
+  g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath();
+}
+
+/* ============================================================ 静态地图（缓存到离屏画布） */
+function buildStaticMap(c){
+  const off = document.createElement('canvas');
+  off.width = W; off.height = H;
+  const g = off.getContext('2d');
+
+  // 底色（草地 / 城市地面）
+  g.fillStyle = COLORS.bg; g.fillRect(0,0,W,H);
+  for (const b of c.blocks){
+    g.fillStyle = COLORS.block;
+    g.fillRect(b.x,b.y,b.w,b.h);
+  }
+
+  const half = c.road_width/2, walk = c.sidewalk;
+
+  // 人行道：比道路宽一圈
+  g.fillStyle = COLORS.walk;
+  for (const x of c.roads.v) g.fillRect(x-half-walk, 0, c.road_width+walk*2, H);
+  for (const y of c.roads.h) g.fillRect(0, y-half-walk, W, c.road_width+walk*2);
+
+  // 车行道
+  g.fillStyle = COLORS.road;
+  for (const x of c.roads.v) g.fillRect(x-half, 0, c.road_width, H);
+  for (const y of c.roads.h) g.fillRect(0, y-half, W, c.road_width);
+
+  // 道路边线
+  g.strokeStyle = COLORS.roadEdge; g.lineWidth = 2;
+  for (const x of c.roads.v){
+    g.beginPath(); g.moveTo(x-half,0); g.lineTo(x-half,H); g.stroke();
+    g.beginPath(); g.moveTo(x+half,0); g.lineTo(x+half,H); g.stroke();
+  }
+  for (const y of c.roads.h){
+    g.beginPath(); g.moveTo(0,y-half); g.lineTo(W,y-half); g.stroke();
+    g.beginPath(); g.moveTo(0,y+half); g.lineTo(W,y+half); g.stroke();
+  }
+
+  // 车道虚线：横向道路画双黄线两侧的白虚线，纵向同理
+  g.strokeStyle = 'rgba(214,226,242,.55)';
+  g.lineWidth = 2; g.setLineDash([10,12]);
+  for (const x of c.roads.v){
+    g.beginPath(); g.moveTo(x-7,0); g.lineTo(x-7,H); g.stroke();
+    g.beginPath(); g.moveTo(x+7,0); g.lineTo(x+7,H); g.stroke();
+  }
+  for (const y of c.roads.h){
+    g.beginPath(); g.moveTo(0,y-7); g.lineTo(W,y-7); g.stroke();
+    g.beginPath(); g.moveTo(0,y+7); g.lineTo(W,y+7); g.stroke();
+  }
+  g.setLineDash([]);
+
+  // 斑马线：每个路口四条
+  g.fillStyle = COLORS.cross;
+  const offw = c.walk_offset, band = 16;
+  for (const p of c.intersections){
+    // 北 / 南：东西向过街，白色竖条
+    for (const yy of [p.y-offw, p.y+offw]){
+      for (let x = p.x-offw+6; x < p.x+offw-4; x += 15){
+        g.fillRect(x, yy-band/2, 8, band);
+      }
+    }
+    // 西 / 东：南北向过街，白色横条
+    for (const xx of [p.x-offw, p.x+offw]){
+      for (let y = p.y-offw+6; y < p.y+offw-4; y += 15){
+        g.fillRect(xx-band/2, y, band, 8);
+      }
+    }
+  }
+
+  // 建筑
+  for (const b of c.buildings){
+    g.fillStyle = b.color;
+    roundRect(g,b.x,b.y,b.w,b.h,4); g.fill();
+    g.strokeStyle = 'rgba(120,160,210,.28)'; g.lineWidth = 1; g.stroke();
+    // 窗户
+    const cols = Math.max(2, Math.floor(b.w/26));
+    const rows = Math.max(2, Math.floor(b.h/30));
+    const gw = b.w/(cols+1), gh = b.h/(rows+1);
+    for (let i=0;i<cols;i++){
+      for (let j=0;j<rows;j++){
+        const lit = (i*7+j*13+Math.floor(b.x)) % 5 !== 0;
+        g.fillStyle = lit ? 'rgba(246,199,106,.78)' : 'rgba(60,95,140,.5)';
+        g.fillRect(b.x+gw*(i+1)-3, b.y+gh*(j+1)-4, 7, 8);
+      }
+    }
+  }
+
+  // 树木
+  for (const t of c.trees){
+    g.fillStyle = 'rgba(0,0,0,.28)';
+    g.beginPath(); g.arc(t.x+2,t.y+3,t.r,0,Math.PI*2); g.fill();
+    g.fillStyle = COLORS.tree;
+    g.beginPath(); g.arc(t.x,t.y,t.r,0,Math.PI*2); g.fill();
+    g.fillStyle = 'rgba(134,239,172,.25)';
+    g.beginPath(); g.arc(t.x-t.r*.28,t.y-t.r*.28,t.r*.45,0,Math.PI*2); g.fill();
+  }
+
+  // 服务站点
+  for (const st of c.stations){
+    const emoji = st.kind === 'refill' ? '💧' : '🔧';
+    g.save();
+    g.fillStyle = 'rgba(8,15,26,.8)';
+    roundRect(g, st.x-34, st.y-26, 68, 52, 9); g.fill();
+    g.strokeStyle = st.kind === 'refill' ? 'rgba(56,189,248,.65)' : 'rgba(245,158,11,.65)';
+    g.lineWidth = 1.5; g.stroke();
+    g.font = '20px ' + EMOJI_FONT;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(emoji, st.x, st.y-7);
+    g.fillStyle = '#c9d8ec'; g.font = '10px "Microsoft YaHei",sans-serif';
+    g.fillText(st.name, st.x, st.y+15);
+    g.restore();
+  }
+
+  // 地图边框
+  g.strokeStyle = 'rgba(56,189,248,.12)'; g.lineWidth = 8;
+  g.strokeRect(4,4,W-8,H-8);
+  return off;
+}
+
+/* ============================================================ 动态绘制 */
+function currentSignal(s){
+  return s && s.signal === 'EW' ? 'EW' : 'NS';
+}
+
+function drawSignals(s){
+  const gp = currentSignal(s) === 'NS';
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const p of city.intersections){
+    const x = p.x-24, y = p.y-24;
+    ctx.fillStyle = 'rgba(6,12,22,.78)';
+    roundRect(ctx,x-4,y-10,34,20,6); ctx.fill();
+    ctx.font = '7px "Microsoft YaHei",sans-serif';
+    ctx.fillStyle = '#93a7c2';
+    ctx.fillText('N', x+4, y-5);
+    ctx.fillText('E', x+16, y-5);
+    // 左点 = 南北方向，右点 = 东西方向
+    ctx.fillStyle = gp ? '#22c55e' : '#ef4444';
+    ctx.beginPath(); ctx.arc(x+4,y+3,4.5,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = gp ? '#ef4444' : '#22c55e';
+    ctx.beginPath(); ctx.arc(x+16,y+3,4.5,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawFire(f, now){
+  const pulse = 1 + 0.08*Math.sin(now/160 + f.id);
+  const r = 18 + f.intensity*0.16;
+  const grd = ctx.createRadialGradient(f.x,f.y,2,f.x,f.y,r*1.7);
+  grd.addColorStop(0,'rgba(251,146,60,.55)');
+  grd.addColorStop(.45,'rgba(239,68,68,.24)');
+  grd.addColorStop(1,'rgba(239,68,68,0)');
+  ctx.fillStyle = grd;
+  ctx.beginPath(); ctx.arc(f.x,f.y,r*1.7,0,Math.PI*2); ctx.fill();
+  ctx.save();
+  ctx.font = (26 + f.intensity*0.08)*pulse + 'px ' + EMOJI_FONT;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('🔥', f.x, f.y-2);
+  ctx.restore();
+  // 强度环
+  ctx.strokeStyle = 'rgba(248,113,113,.8)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(f.x,f.y,26,-Math.PI/2,-Math.PI/2 + Math.PI*2*(f.intensity/100)); ctx.stroke();
+}
+
+function drawPed(p){
+  ctx.save();
+  ctx.font = '23px ' + EMOJI_FONT;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(p.emoji || '🚶', p.x, p.y);
+  if (p.state === 'waiting'){
+    ctx.font = '11px ' + EMOJI_FONT;
+    ctx.fillStyle = '#fbbf24';
+    ctx.fillText('⏳', p.x+13, p.y-17);
+  }
+  ctx.restore();
+}
+
+function drawTruck(t, s, now){
+  const x = t.x, y = t.y, heading = t.heading || 0;
+  const checking = s.self_check && s.self_check.running;
+
+  // 自检扫描圈（放在车下面）
+  if (checking){
+    const r = 40 + 6*Math.sin(now/140);
+    ctx.strokeStyle = 'rgba(56,189,248,.8)'; ctx.lineWidth = 2;
+    ctx.setLineDash([7,7]); ctx.lineDashOffset = -now/40;
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(56,189,248,.9)'; ctx.font = '11px "Microsoft YaHei",sans-serif';
+    ctx.textAlign='center'; ctx.fillText('自检扫描', x, y-52);
+  }
+
+  // 车身阴影
+  ctx.fillStyle = 'rgba(0,0,0,.42)';
+  ctx.beginPath(); ctx.ellipse(x+3,y+8,25,15,heading,0,Math.PI*2); ctx.fill();
+
+  // 消防车（系统 emoji，不做自定义贴图）
+  ctx.save();
+  ctx.translate(x,y);
+  ctx.rotate(heading + Math.PI);
+  ctx.font = '42px ' + EMOJI_FONT;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('🚒', 0, 0);
+  ctx.restore();
+
+  // 故障标记
+  if (t.fault){
+    ctx.fillStyle = 'rgba(239,68,68,.95)';
+    roundRect(ctx,x+20,y-44,38,18,9); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='10px "Microsoft YaHei",sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('故障', x+39, y-35);
+  }
+
+  // 机械臂：从车头伸向路障
+  if (t.arm && t.arm.target){
+    const tx = t.arm.target.x, ty = t.arm.target.y;
+    const prog = t.arm.progress || 0;
+    const reach = 26 + (Math.hypot(tx-x,ty-y)-26)*clamp(prog,0,1);
+    const ang = Math.atan2(ty-y, tx-x);
+    const ex = x + Math.cos(ang)*reach, ey = y + Math.sin(ang)*reach;
+    ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(ex,ey); ctx.stroke();
+    ctx.beginPath(); ctx.arc(ex,ey,4,0,Math.PI*2); ctx.fillStyle='#fbbf24'; ctx.fill();
+    ctx.font='16px ' + EMOJI_FONT; ctx.textAlign='center';
+    ctx.fillText('🦾', ex, ey-12);
+  }
+
+  // 喷水
+  if (t.spray && t.spray_target){
+    const tx=t.spray_target.x, ty=t.spray_target.y;
+    ctx.strokeStyle='rgba(56,189,248,.5)'; ctx.lineWidth=3; ctx.setLineDash([4,6]);
+    ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(tx,ty); ctx.stroke(); ctx.setLineDash([]);
+    for (let i=0;i<9;i++){
+      const k = (now/90 + i*0.36) % 1;
+      const jx = Math.sin(now/70 + i*2.1)*10;
+      const jy = Math.cos(now/80 + i*1.7)*10;
+      ctx.fillStyle = 'rgba(125,211,252,' + (0.75*(1-k)) + ')';
+      ctx.beginPath();
+      ctx.arc(lerp(x,tx,k)+jx, lerp(y,ty,k)+jy, 2.5, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  // 车顶水量条
+  const bw = 44, bh = 5;
+  ctx.fillStyle='rgba(6,12,22,.8)';
+  roundRect(ctx,x-bw/2,y-40,bw,bh,2.5); ctx.fill();
+  const ratio = clamp(t.water/100,0,1);
+  ctx.fillStyle = ratio < .1 ? '#ef4444' : ratio < .25 ? '#f59e0b' : '#38bdf8';
+  roundRect(ctx,x-bw/2,y-40,bw*ratio,bh,2.5); ctx.fill();
+}
+
+function findPrev(list, id){
+  if (!prevState) return null;
+  const arr = prevState[list] || [];
+  return arr.find(o => o.id === id) || null;
+}
+
+function drawScene(now){
+  if (!staticMap || !city) return;
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(staticMap,0,0);
+  const a = prevState, b = curState;
+  if (!b) return;
+  const span = Math.max(1, curStamp - prevStamp);
+  const alpha = a ? clamp((now - curStamp)/span, 0, 1) : 1;
+  const s = b;
+
+  drawSignals(s);
+
+  // 火情
+  for (const f of s.fires) drawFire(f, now);
+
+  // 路障
+  for (const o of s.obstacles){
+    ctx.save();
+    ctx.font = '24px ' + EMOJI_FONT;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('🚧', o.x, o.y);
+    ctx.restore();
+  }
+
+  // 行人（位置插值，视觉更顺滑）
+  for (const p of s.pedestrians){
+    const old = findPrev('pedestrians', p.id);
+    const x = old ? lerp(old.x, p.x, alpha) : p.x;
+    const y = old ? lerp(old.y, p.y, alpha) : p.y;
+    drawPed({ ...p, x, y });
+  }
+
+  // 消防车
+  const t = s.truck;
+  const oldT = a ? a.truck : null;
+  const tx = oldT ? lerp(oldT.x, t.x, alpha) : t.x;
+  const ty = oldT ? lerp(oldT.y, t.y, alpha) : t.y;
+  const th = oldT ? lerpAngle(oldT.heading, t.heading, alpha) : t.heading;
+  drawTruck({ ...t, x:tx, y:ty, heading:th }, s, now);
+
+  // 画布左上角状态条
+  ctx.save();
+  ctx.fillStyle = 'rgba(6,12,22,.72)';
+  roundRect(ctx,14,14,250,54,10); ctx.fill();
+  ctx.fillStyle = '#7dd3fc'; ctx.font='12px "Microsoft YaHei",sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText('状态：' + (STATE_NAMES[t.state] || t.state), 28, 34);
+  ctx.fillStyle = '#8fa3bf'; ctx.font='11px "Microsoft YaHei",sans-serif';
+  ctx.fillText(`速度 ${t.speed.toFixed(1)} ｜ 位置 (${t.x.toFixed(0)}, ${t.y.toFixed(0)})`, 28, 53);
+  ctx.restore();
+}
+
+/* ============================================================ 侧栏渲染 */
+function renderState(s){
+  $('clock').textContent = s.time.toFixed(1) + 's';
+  const sig = s.signal === 'NS' ? '南北绿灯' : '东西绿灯';
+  $('signal').textContent = sig + ' · ' + s.signal_remaining.toFixed(0) + 's';
+
+  const t = s.truck;
+  $('waterText').textContent = t.water.toFixed(0) + '%';
+  $('waterBar').classList.toggle('low', t.water < 25);
+  $('waterBar').firstElementChild.style.width = clamp(t.water,0,100) + '%';
+  $('stateText').textContent = STATE_NAMES[t.state] || t.state;
+  $('speedText').textContent = '速度 ' + t.speed.toFixed(1) + (t.slowing ? ' · 行人慢行' : '');
+
+  $('statsText').innerHTML =
+    `灭火 ${s.stats.fires_out} ｜ 补水 ${s.stats.refills}<br>` +
+    `维修 ${s.stats.repairs} ｜ 清障 ${s.stats.obstacles_cleared}`;
+
+  // 自检面板
+  const sc = s.self_check;
+  const badge = $('checkBadge');
+  if (sc.running){ badge.textContent = '进行中'; badge.className = 'badge run'; }
+  else if (sc.passed === true){ badge.textContent = '通过'; badge.className = 'badge ok'; }
+  else if (sc.passed === false){ badge.textContent = '未通过'; badge.className = 'badge fail'; }
+  else { badge.textContent = '未开始'; badge.className = 'badge'; }
+  $('checkBar').style.width = Math.round((sc.progress || 0)*100) + '%';
+  const ul = $('checkSteps');
+  ul.innerHTML = sc.steps.map(st => {
+    const cls = st.status === 'pass' ? 'pass' : st.status === 'fail' ? 'fail' : st.status === 'running' ? 'running' : '';
+    const detail = st.status === 'running' ? '检测中…' : (st.status === 'pending' ? '等待检测' : (st.detail || ''));
+    const icon = st.status === 'pass' ? '✓' : st.status === 'fail' ? '✕' : st.status === 'running' ? '…' : '·';
+    return `<li class="${cls}"><span class="dot"></span><span class="name">${st.name}</span><span class="detail">${icon} ${detail}</span></li>`;
+  }).join('');
+
+  // 告警
+  const alerts = s.alerts || [];
+  $('alerts').innerHTML = alerts.map(a => `<li class="${a.level}">${a.type}</li>`).join('');
+
+  // 事件
+  $('events').innerHTML = (s.events || []).map(e =>
+    `<li class="${e.level}"><time>${e.time.toFixed(1)}s</time><span>${e.text}</span></li>`
+  ).join('');
+}
+
+/* ============================================================ 网络与主循环 */
+async function post(url){
+  try {
+    await fetch(url, { method:'POST' });
+    await pull();
+  } catch(e) { /* 页面下方会显示断线状态 */ }
+}
+
+async function resetSim(){
+  if (!confirm('重置所有车辆、火情和行人状态？')) return;
+  await post('/api/reset');
+}
+
+async function pull(){
+  try {
+    const raw = await fetch('/api/state');
+    const s = await raw.json();
+    if (curState && s.time < curState.time) {
+      prevState = null; prevStamp = 0;
+    } else {
+      prevState = curState; prevStamp = curStamp;
+    }
+    curState = s;
+    curStamp = performance.now();
+    renderState(s);
+  } catch(e){
+    $('alerts').innerHTML = '<li class="critical">连不上后端：请先运行 uvicorn main:app --reload</li>';
+  }
+}
+
+function animate(now){
+  drawScene(now);
+  requestAnimationFrame(animate);
+}
+
+async function boot(){
+  try {
+    city = await (await fetch('/api/city')).json();
+    staticMap = buildStaticMap(city);
+  } catch(e){
+    $('alerts').innerHTML = '<li class="critical">城市地图加载失败，请检查后端</li>';
+  }
+  await pull();
+  setInterval(pull, 220);
+  requestAnimationFrame(animate);
+}
+
+boot();
+</script>
+</body>
+</html>
