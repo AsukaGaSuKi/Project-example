@@ -1,12 +1,246 @@
-# 自动消防小车 · 城市交通仿真
+# 🚒 自动消防小车 · 城市交通仿真（AI 最优路线版）
 
-在原来的「Web 智能巡检机器人」脚手架上改写：一台带机械臂的消防小车，在连续坐标的城市路网中自动完成
-**自检 → 出警 → 灭火 → 补水 / 维修 → 清障 → 避让行人** 的完整闭环，所有过程都可以在网页上实时观察。
+> 一台带机械臂的消防小车，在连续坐标的城市路网中完成 **自检 → 出警 → 灭火 → 补水 / 维修 → 清障 → 避让行人** 的完整闭环；
+> 新增的 **AI 领航员 MOMO** 会在地图上算出一条「一次出车、多点火情」的最优处置路线，并可以一键接管车辆执行。
 
-- 纯 Python + FastAPI + 原生 Canvas，无前端框架、无外部地图服务；
-- 车辆和行人都是连续坐标移动，不再一格一格跳；
-- 车辆、行人、火情、路障使用系统 emoji（Twemoji 同款字符）作为图形，不自行绘制角色形象；
-- 仿真规则集中在 `backend/sim/`，可以脱离浏览器单独测试。
+**在线演示**：部署后把地址填在这里 → `https://<your-app>.onrender.com`
+**本地体验**：启动后打开 <http://127.0.0.1:8000>
+
+![AI 最优路线规划](docs/screenshots/ai-plan.png)
+
+---
+
+## 项目能做什么
+
+| 能力 | 说明 |
+| --- | --- |
+| 🤖 **AI 最优路线** | 点击「✨ AI 最优路线」，A* 先算出目标点两两最短路，再用 2-opt / 状态压缩 DP 求出访问顺序，地图上画出紫色光带与编号站点，一键交给小车执行 |
+| 🧑‍🚀 **AI 领航员 MOMO** | 页面右下角的 Live2D 风格小助手：会呼吸、会漂浮、会眨眼式闪烁；点她有台词，规划时进入「思考」状态，执行时实时播报下一站 |
+| 🔍 全车自检 | 水量、电池、机械臂、水泵、传感器、导航 6 项，开始 / 进度 / 逐项结果全部可视化 |
+| 🔥 自动灭火 | 火情触发自检，通过后出车；喷水灭火时允许水量低于 10%，耗尽才补水 |
+| 💧 补水 / 🔧 维修 | 低水量或功能故障时，用 A* 按**行驶距离**选择最近的服务站 |
+| 🚧 机械臂清障 | 行驶中探测正前方路障，停车 1.6 秒伸臂移除，然后继续任务 |
+| 🚶 行人交通规则 | 行人只走人行道和斑马线，红灯在路口等待；小车遇行人 ±35° 锥形区自动降速 / 停车 |
+| 🗺️ 城市路网 | 三纵三横双向道路、红绿灯、建筑、树木、补水站、维修站，全部由 Canvas 绘制 |
+
+![AI 接管执行中](docs/screenshots/ai-running.png)
+
+---
+
+## AI 最优路线是怎么算的
+
+一次出车往往要跑多个火点，**先去哪个**直接决定总里程。模块把问题拆成三层（代码：[`backend/algo/route_planner.py`](backend/algo/route_planner.py)）：
+
+1. **两两最短路（A*）**
+   以车行路网为加权图，欧氏距离为启发函数，求出「当前位置 → 每个目标点」以及「目标点之间」的最短距离，组成距离矩阵。
+2. **访问顺序（Open-TSP）**
+   这是「从起点出发、走遍所有目标、不需要回到起点」的开放旅行商问题，模块同时跑四种方案做对比：
+   - 原始顺序：按火情出现的先后走（人最容易想到的顺序）；
+   - 最近邻贪心：每一步都去离当前最近的未访问点；
+   - 最近邻 + 2-opt：对贪心结果做「翻转一段」的局部改良，直到无法变短；
+   - 状态压缩 DP（Held-Karp）：目标点 ≤ 10 个时直接枚举状态求**精确最优**。
+3. **选优与解释**
+   取总里程最短的方案，输出每一段的距离、预计用时、相对「原始顺序」节省的里程与百分比，并把整条路线转成「靠右车道」的折线交给前端绘制。
+
+> 答辩时可以直接说清楚：**A* 负责「怎么走」，2-opt / DP 负责「先走哪」**，两者组合才是完整的路径规划。
+> 没有火情时，同一套算法会自动改为 **全域预防性巡检**：把 12 个巡检点串成一条最省时的巡视路线。
+
+<details>
+<summary>算法对比示例（面板里也会实时显示）</summary>
+
+| 方案 | 总里程 |
+| --- | --- |
+| 原始顺序（按发现顺序） | 1650 |
+| 最近邻贪心 | 1190 |
+| 最近邻 + 2-opt | 1190 |
+| 状态压缩 DP（精确最优） | **1190** |
+
+</details>
+
+### 交互流程
+
+1. 点击右侧「✨ AI 最优路线」或气泡里的「规划路线」；
+2. 地图出现发光路线、编号站点，侧栏列出访问顺序与每段里程；
+3. 点「执行」后小车进入 `ai_mission` 状态，逐站前往：到火点自动喷水，扑灭后继续下一站；
+4. 执行中面板显示进度与已完成站点；低水量、故障、自检会自动中断 AI 任务并转交原有调度逻辑。
+
+---
+
+## 快速开始
+
+```bash
+cd backend
+pip install -r requirements.txt
+python -m uvicorn main:app --reload
+```
+
+打开：
+
+- <http://127.0.0.1:8000> —— 仿真控制台
+- <http://127.0.0.1:8000/docs> —— 接口调试台
+
+### 跑测试
+
+```bash
+cd backend
+python -m pytest tests
+```
+
+当前 **29 个用例**：原有 15 个覆盖低水量调度、补水、火情自检、灭火闭环、故障维修、机械臂清障、行人降速 / 红绿灯；
+新增 14 个覆盖 **最短路矩阵、DP 与暴力枚举一致性、2-opt 改进、路线覆盖与不可达剔除，以及 AI 接管、逐站执行、取消、自检互斥**。
+
+### Docker
+
+```bash
+docker compose up --build
+```
+
+打开 <http://127.0.0.1:8000>。CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push / PR 时自动跑测试。
+
+---
+
+## 接口
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| GET | `/api/city` | 静态地图（道路、建筑、站点、火情点位） |
+| GET | `/api/state` | 一帧完整状态 + 告警 + **AI 任务进度与路线折线** |
+| GET | `/api/alerts` | 仅告警 |
+| POST | `/api/fire` | 模拟检测到火情 |
+| POST | `/api/fault?kind=arm` | 注入故障，`kind` 可省略 |
+| POST | `/api/selfcheck` | 手动自检 |
+| POST | `/api/obstacle?ahead=true` | 放置路障，`ahead` 放在车头前方 |
+| POST | `/api/ai/route` | **AI 规划**：返回访问顺序、分段里程、算法对比、路线折线 |
+| POST | `/api/ai/execute` | **AI 接管**：按规划顺序出车，逐站处理 |
+| POST | `/api/ai/cancel` | 取消 AI 任务，交还原有调度 |
+| POST | `/api/reset` | 重置仿真 |
+
+`POST /api/ai/route` 返回示例（节选）：
+
+```json
+{
+  "ok": true,
+  "mode": "fire",
+  "mode_label": "多火情最优处置路线",
+  "stops": [
+    { "order": 1, "label": "火情 #2", "fire_id": 2, "node": 11,
+      "x": 170, "y": 250, "leg_distance": 280.0 }
+  ],
+  "total_distance": 1190.0,
+  "baseline_distance": 1650.0,
+  "saved_distance": 460.0,
+  "saved_percent": 27.9,
+  "eta": 22.4,
+  "algorithm": {
+    "name": "状态压缩 DP（精确最优）",
+    "shortest_path": "A*（欧氏距离启发）",
+    "optimizer": "状态压缩 DP",
+    "targets": 3,
+    "candidates": [
+      { "name": "原始顺序", "distance": 1650.0 },
+      { "name": "最近邻贪心", "distance": 1190.0 }
+    ]
+  },
+  "polyline": [[154.0, 300.0], [170.0, 316.0]],
+  "explanation": ["识别到 3 个目标点，先用 A* 算出两两最短路……"]
+}
+```
+
+---
+
+## 项目架构
+
+```mermaid
+flowchart LR
+  subgraph Browser["浏览器"]
+    UI["index.html<br/>Canvas 地图 · AI 面板<br/>MOMO 小助手"]
+  end
+  subgraph Server["FastAPI 后端"]
+    API["main.py<br/>HTTP 接口 + 静态托管"]
+    LOOP["20Hz 心跳线程"]
+    W["sim/world.py<br/>车辆状态机 · 火情 · 行人"]
+    C["sim/city.py<br/>车行图 / 人行图 / 站点"]
+    P["algo/pathfinding.py<br/>A* / BFS"]
+    R["algo/route_planner.py<br/>距离矩阵 · 2-opt · DP"]
+    D["ai/detector.py<br/>告警规则"]
+  end
+  UI -- "GET /api/state（220ms）" --> API
+  UI -- "POST /api/ai/route|execute|cancel" --> API
+  API --> W
+  API --> D
+  LOOP --> W
+  W --> C
+  W --> P
+  W --> R
+```
+
+AI 规划的时序：
+
+```mermaid
+sequenceDiagram
+  participant U as 访客
+  participant F as 前端
+  participant W as World
+  participant R as route_planner
+  U->>F: 点击「AI 最优路线」
+  F->>W: POST /api/ai/route
+  W->>R: plan(adj, xy, 起点, 目标点)
+  R->>R: 最短路矩阵 → 贪心 → 2-opt → DP
+  R-->>W: 顺序 / 分段里程 / 算法对比
+  W-->>F: JSON + 车道折线
+  F->>U: 紫色路线 + 编号 + 小助手播报
+  U->>F: 点击「执行」
+  F->>W: POST /api/ai/execute
+  W->>W: 状态机进入 ai_mission，逐站前往
+```
+
+### 目录与职责
+
+```text
+backend/
+├── main.py                 HTTP 接口 + 20Hz 心跳线程 + 静态页面托管
+├── sim/city.py             城市底图、车行图、人行图、站点与火情点位
+├── sim/world.py            车辆状态机、行人、火情、机械臂、自检、补水/维修、AI 任务执行
+├── algo/pathfinding.py     网格 BFS/A*（保留教学）+ 加权图 A*
+├── algo/route_planner.py   AI 最优路线：距离矩阵、最近邻、2-opt、状态压缩 DP
+├── ai/detector.py          告警规则
+├── static/index.html       Canvas 控制台 + AI 面板 + MOMO 小助手
+├── static/assets/          AI 助手立绘（透明背景 PNG）
+└── tests/                  仿真、算法与 AI 路线测试
+docs/
+├── requirements.md         验收项（含 AI 新增条目）
+├── ai-route.md             AI 路径规划设计与接口细节
+└── screenshots/            演示截图
+```
+
+### 车辆状态机
+
+```text
+idle ──火情──> self_check ──通过──> to_fire ──到达──> extinguishing ──扑灭──> idle
+  │                 │                    │                  │
+  │                 └──失败──> to_repair │                  └──水耗尽──> to_refill
+  ├──水量<10%────────────────────────────┴──> to_refill ──到达──> refilling ──> idle
+  ├──故障───────────────────────────────────> to_repair ──到达──> repairing ──> idle
+  └──AI 规划──> ai_mission ──到达火点──> extinguishing ──扑灭──> ai_mission ──全部完成──> idle
+                     └──到达巡检点──> ai_scan ──1.4s──> ai_mission
+```
+
+- 车辆在道路中心线右侧 16 单位行驶，航点由路网节点自动生成；
+- 行人使用另一张「人行道 + 斑马线」图，斑马线边带 `cross_ew / cross_ns` 类型，分别只在东西 / 南北绿灯时放行；
+- AI 任务与原有的 `to_fire / to_refill / to_repair` 共用同一套驾驶、避让、机械臂逻辑。
+
+---
+
+## 演示流程（约 2 分钟）
+
+1. 打开页面，等待第一处火情自动出现：自检面板逐项变绿，小车出发；
+2. 点两三次「🔥 模拟火情」，制造多个目标；
+3. 点「✨ AI 最优路线」：看地图上的紫色路线、编号站点，以及侧栏「比原顺序省 xx%」；
+4. 点「🚀 执行」：小车按最优顺序逐站灭火，MOMO 会播报「第 2/3 站」；
+5. 点一下 MOMO：她会说一句规划小知识；点「–」可以收起气泡；
+6. 再试「🚧 前方放路障」「🛠 注入故障」：AI 任务会自动中断，回到原有的清障 / 维修流程。
+
+---
 
 ## 需求对照
 
@@ -22,86 +256,33 @@
 | 世界交通地图化 | 六条双向道路、人行道、斑马线、红绿灯、建筑、树木、补水站、维修站 |
 | 行人和车辆不走格子 | 连续坐标 + 航点跟踪 + 转向角速度限制 |
 | 随机行人遵守交通规则 | 行人随机起点 / 终点，只走人行道与斑马线，红灯在路口等待 |
+| **AI 自动寻找最优路线** | **A\* 最短路矩阵 + 2-opt / 状态压缩 DP 求访问顺序，地图可视化 + 一键执行** |
+| **AI 助手互动** | **MOMO 立绘：漂浮 / 呼吸 / 思考 / 跳跃动画，气泡打字机、台词互动、规划与执行播报** |
 
-## 怎么跑
+---
 
-```bash
-cd backend
-pip install -r requirements.txt
-python -m uvicorn main:app --reload
-```
+## 成员与分工
 
-浏览器打开：
-
-- <http://127.0.0.1:8000> —— 仿真控制台
-- <http://127.0.0.1:8000/docs> —— 接口调试台
-
-## 跑测试
-
-```bash
-cd backend
-python -m pytest tests
-```
-
-当前 15 个用例覆盖：低水量调度、补水完成、火情自检、灭火闭环、故障维修、灭火耗水、机械臂清障、
-行人降速、行人红绿灯等待、自检可视化状态、路网连通性和图 A*。
-
-## 演示流程（约 1 分钟）
-
-1. 页面每 6 秒左右自动生成第一处火情，观察右侧自检面板逐项变绿，随后小车出发；
-2. 点击「🚧 前方放路障」：小车会停车伸臂清障；
-3. 点击「🛠 注入故障」：自检失败 → 前往维修站 → 修复后重新自检；
-4. 连续点击「🔥 模拟火情」把水用到 10% 以下：灭火中允许继续，耗尽后自动补水；
-5. 观察行人：只走人行道和斑马线，红灯在路口等待，小车接近时明显降速。
-
-## 目录与职责
-
-```text
-backend/
-├── main.py                HTTP 接口 + 20Hz 心跳线程 + 静态页面托管
-├── sim/city.py            城市底图、车行图、人行图、站点与火情点位
-├── sim/world.py           车辆状态机、行人、火情、机械臂、自检、补水/维修
-├── algo/pathfinding.py    网格 BFS/A*（保留教学）+ 加权图 A*
-├── ai/detector.py         告警规则
-├── static/index.html      Canvas 控制台
-└── tests/                 仿真与算法测试
-```
-
-### 车辆状态机
-
-```text
-idle ──火情──> self_check ──通过──> to_fire ──到达──> extinguishing ──扑灭──> idle
-  │                 │                    │                  │
-  │                 └──失败──> to_repair │                  └──水耗尽──> to_refill
-  ├──水量<10%────────────────────────────┴──> to_refill ──到达──> refilling ──> idle
-  └──故障───────────────────────────────────> to_repair ──到达──> repairing ──> idle
-```
-
-- 车辆在道路中心线右侧 16 单位行驶，航点由路网节点自动生成；
-- 路网 A* 的代价是欧氏距离，站点和火情点都作为道路锚点接入图中；
-- 行人使用另一张「人行道 + 斑马线」图，斑马线边带 `cross_ew / cross_ns` 类型，
-  分别只在东西 / 南北绿灯时放行。
-
-## 接口
-
-| 方法 | 路径 | 作用 |
+| 成员 | 负责内容 | 主要文件 |
 | --- | --- | --- |
-| GET | `/api/city` | 静态地图（道路、建筑、站点、火情点位） |
-| GET | `/api/state` | 一帧完整状态 + 告警 |
-| GET | `/api/alerts` | 仅告警 |
-| POST | `/api/fire` | 模拟检测到火情 |
-| POST | `/api/fault?kind=arm` | 注入故障，`kind` 可省略 |
-| POST | `/api/selfcheck` | 手动自检 |
-| POST | `/api/obstacle?ahead=true` | 放置路障，`ahead` 放在车头前方 |
-| POST | `/api/reset` | 重置仿真 |
+| Plmxs017（模板作者） | 城市路网与仿真内核、车辆状态机、自检 / 告警、基础页面与测试 | `backend/sim/*`、`backend/algo/pathfinding.py`、`backend/ai/detector.py` |
+| jingliuCV | AI 最优路线模块、AI 接管执行、MOMO 小助手与路线可视化、文档与部署 | `backend/algo/route_planner.py`、`backend/sim/world.py`（AI 部分）、`backend/static/index.html`、`docs/ai-route.md` |
 
-## Docker
+> 分工表可按实际情况修改；模板部分来自 <https://github.com/Plmxs017/Project-example>。
 
-```bash
-docker compose up --build
-```
+## 部署（可选）
 
-打开 <http://127.0.0.1:8000>。CI（`.github/workflows/ci.yml`）在每次 push / PR 时执行测试。
+- **Docker**：仓库根目录已提供 `dockerfile` 与 `docker-compose.yml`，`docker compose up --build` 即可；
+- **Render**：仓库根目录的 `render.yaml` 可直接一键创建 Web Service（免费实例休眠后首次访问较慢）；
+- 部署完成后，把访问地址填到本文开头的「在线演示」。
+
+## 已知边界
+
+- 这是教学演示级仿真：没有真实的传感器噪声、车辆动力学和碰撞物理；
+- AI 路线只考虑「火情 / 巡检点」的位置，不把水量与故障纳入路径优化；执行中遇到低水量、故障会中断并回到原有调度；
+- 目标点 ≤ 10 个时用精确 DP，更多目标会自动退化为 2-opt 近似解；
+- 行人与车辆之间是「车辆让行」规则，不模拟行人躲车；
+- 信号灯为固定 20 秒周期，未接入实时配时。
 
 ## 参考的开源项目
 
@@ -112,10 +293,3 @@ docker compose up --build
 - **A/B Street**：人行道、斑马线与行人过街的交互设计；
 - **PathFinding.js**：A* / BFS 的可视化与启发函数写法；
 - **Twemoji**：页面角色使用系统 emoji 字符，样式参考 Twemoji 的跨平台做法。
-
-## 已知边界
-
-- 这是教学演示级仿真：没有真实的传感器噪声、车辆动力学和碰撞物理；
-- 行人与车辆之间是「车辆让行」规则，不模拟行人躲车；
-- 车辆只走主干道，不进入建筑内部；火情点在建筑门口，消防车隔空喷水；
-- 信号灯为固定 20 秒周期，未接入实时配时。
