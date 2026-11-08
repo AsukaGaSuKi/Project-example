@@ -1322,6 +1322,24 @@ class World:
         return (car.x - math.sin(car.heading) * car.side,
                 car.y + math.cos(car.heading) * car.side)
 
+    def _car_lane_heading(self, car: NpcCar) -> float | None:
+        """小车所在路段的车道方向（用来把车头摆正）。"""
+        i = car.wp_index
+        if i < len(car.waypoints):
+            tx, ty = car.waypoints[i]
+            if i > 0:
+                px, py = car.waypoints[i - 1]
+            else:
+                px, py = car.x, car.y
+            if math.hypot(tx - px, ty - py) > 1.0:
+                return math.atan2(ty - py, tx - px)
+        if i > 0:
+            px, py = car.waypoints[i - 1]
+            tx, ty = car.waypoints[min(i, len(car.waypoints) - 1)]
+            if math.hypot(tx - px, ty - py) > 1.0:
+                return math.atan2(ty - py, tx - px)
+        return None
+
     def _in_building(self, x: float, y: float, margin: float = 8.0) -> bool:
         """这个位置是不是压在建筑上：小车不许开进建筑。"""
         for b in self.city.buildings:
@@ -1560,6 +1578,19 @@ class World:
                 car.x, car.y = bx, by
                 car.reverse = 0.0                  # 倒一步就停，避免倒退撞到后车
 
+        # 停住时把车头摆正：不许横在路面上（靠边让消防车时允许斜停在路边）
+        if abs(car.speed) < 3.0 and car.side < CAR_PULL_OVER - 0.5:
+            lane = self._car_lane_heading(car)
+            if lane is not None:
+                diff = (lane - car.heading + math.pi) % (2 * math.pi) - math.pi
+                if abs(diff) > 0.08:
+                    turn = min(abs(diff), 4.0 * dt)
+                    new_heading = car.heading + math.copysign(turn, diff)
+                    px = car.x - math.sin(new_heading) * car.side
+                    py = car.y + math.cos(new_heading) * car.side
+                    if not self._in_building(px, py) and not self._rotated_crowds(car, px, py):
+                        car.heading = (new_heading + math.pi) % (2 * math.pi) - math.pi
+
         # 横向让行：靠路肩，让完自动回正；横移同样不许挤到别人
         want = self._car_target_side(car)
         step = CAR_SIDE_RATE * dt
@@ -1593,6 +1624,20 @@ class World:
                 return False                       # 别把车横移到行人身上
         return True
 
+    def _rotated_crowds(self, car: NpcCar, px: float, py: float) -> bool:
+        """原地摆正车头时，新车身位置会不会碰到别人。"""
+        if self._truck_crowds(px, py):
+            return True
+        for other in self.cars:
+            if other.id == car.id:
+                continue
+            ox, oy = self._car_drawn_xy(other)
+            if self._cars_crowd(car, px, py, ox, oy):
+                return True
+        for ped in self.pedestrians:
+            if math.hypot(ped.x - px, ped.y - py) < 22:
+                return True
+        return False
     def _would_crowd(self, car: NpcCar, nx: float, ny: float) -> bool:
         """这一步挪过去会不会挤到别人：会就这一帧原地不动（不推挤、不瞬移）。
 

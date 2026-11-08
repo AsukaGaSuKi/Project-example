@@ -479,6 +479,28 @@ def test_消防车与小车堵住_小车朝反方向驶离():
     assert cos > 0.2                                    # 目标点确实在反方向
 
 
+def test_停稳的小车不会横在路面上():
+    for seed in (81, 82):
+        w = World(auto_spawn=True, seed=seed)
+        hold = {}
+        parked = bad = 0
+        for _ in range(900):                       # 90 秒
+            w.update(0.1)
+            for car in w.cars:
+                hold[car.id] = hold.get(car.id, 0.0) + 0.1 if abs(car.speed) <= 3 else 0.0
+                if hold[car.id] < 0.5:
+                    continue                        # 只是路过刹一下，不算停稳
+                lane = w._car_lane_heading(car)
+                if lane is None or car.side >= 30:
+                    continue                        # 路边让行停靠允许斜停
+                parked += 1
+                diff = abs((lane - car.heading + math.pi) % (2 * math.pi) - math.pi)
+                if min(diff, math.pi - diff) > math.pi / 4:   # 真正横过来（和车道线垂直）
+                    bad += 1
+        assert parked > 50
+        assert bad / parked < 0.10, (seed, bad, parked)
+
+
 # ---------------------------------------------------------------- 状态导出
 def test_状态里带上两辆小车的绘制字段():
     w = World(auto_spawn=True, seed=14)
