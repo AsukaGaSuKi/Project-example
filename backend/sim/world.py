@@ -63,6 +63,7 @@ JAM_PED_TIME = 1.8       # 疏散行人的时间
 JAM_CAR_TIME = 2.2       # 小车重新找路的时间
 JAM_PED_R = 115.0        # 需要疏散的行人范围
 JAM_TRUCK_DWELL = 2.0    # 消防车到场清理停留时间
+JAM_PULL_TIME = 6.0      # 拥堵时小车靠边让行的时长
 
 # ---- 消防车被堵 / 故障：先让小车撤离，消防车再回去维修 ----
 CLEARWAY_R = 130.0       # 需要撤离的小车范围
@@ -165,6 +166,7 @@ class NpcCar:
     stuck: float = 0.0              # 被堵住的计时
     reverse: float = 0.0            # 倒车让行的剩余时间
     escape: float = 0.0             # 消防车被堵/故障时的撤离计时
+    pull_aside: float = 0.0         # 拥堵时靠边让行的剩余时间
 
     @property
     def yielding(self) -> bool:
@@ -1203,6 +1205,8 @@ class World:
         for car in self.cars:
             if car.escape > 0:
                 car.escape = max(0.0, car.escape - dt)
+            if car.pull_aside > 0:
+                car.pull_aside = max(0.0, car.pull_aside - dt)
             self._car_yield(car)
             self._car_drive(car, dt)
             if car.wp_index >= len(car.waypoints):
@@ -1297,48 +1301,29 @@ class World:
         return longi, abs(dist * math.sin(rel))
 
     def _car_yield(self, car: NpcCar) -> None:
-        """行驶准则：先看路口通行权，再看要不要给消防车让行。
+        """行驶准则：遇到消防车就靠边停下，把车道让出来；路口另外排队。
 
-        - 路口：一次只放一辆车进去（按编号先来后到），已经在路口里的先走完；
-        - 消防车迎面开来 / 从后方追上来：靠到路肩停下，等它过去；
-        - 同侧同向、消防车在前面停下（补水 / 维修 / 灭火）：停在它后面排队等；
-        - 消防车在另一条路上（横向错开）：各走各的。
+        - 消防车在附近（不论迎面、同向、还是停在旁边）：靠路肩停下；
+        - 到了路口：一次只放一辆车进去，按编号先来后到；
+        - 消防车被堵 / 故障时：这一段先不拦，让小车自己开走。
         """
         if car.escape > 0:
             # 消防车被堵 / 故障：这一段先让小车自己开走，不再等它
             car.state = "driving"
             return
 
+        cx, cy = self._car_drawn_xy(car)
+        dist = self._dist(cx, cy, self.truck.x, self.truck.y)
+        limit = CAR_CLEAR_DIST if car.yielding else CAR_YIELD_DIST
+        if dist <= limit or car.pull_aside > 0:
+            car.state = "yield_roadside"           # 靠边停下，让消防车先过
+            return
+
         if self._junction_busy(car):
             car.state = "yield_intersection"
             return
 
-        cx, cy = self._car_drawn_xy(car)
-        dist = self._dist(cx, cy, self.truck.x, self.truck.y)
-        limit = CAR_CLEAR_DIST if car.yielding else CAR_YIELD_DIST
-        if dist > limit:
-            car.state = "driving"
-            return
-
-        gap = self._truck_gap(car)
-        if gap is None:
-            # 消防车在侧后方：只有它还在出车、会追上来时才靠边让行
-            car.state = "yield_roadside" if self._truck_busy() else "driving"
-            return
-
-        ahead_dist, side_dist = gap
-        if side_dist > 36 or ahead_dist < 10:
-            car.state = "driving"                  # 不在同一车道，互不相干
-            return
-
-        if self._truck_oncoming(car):
-            car.state = "yield_roadside"           # 迎面来车：靠边停，让出车道
-        elif self._truck_busy() and self._truck_in_intersection(car):
-            car.state = "yield_intersection"       # 路口：停在路口外等它先过
-        elif self.truck.speed < 5:
-            car.state = "wait_truck"               # 同侧、消防车停下了：排队等它起步
-        else:
-            car.state = "driving"                  # 同侧、它还在走：跟着走
+        car.state = "driving"
 
     @staticmethod
     def _angle_diff(a: float, b: float) -> float:
@@ -1713,7 +1698,7 @@ class World:
         # 消防车要从当前位置开过去，沿途的行人也先让开，免得堵在半路
         nx, ny = self.city.road.xy[node]
         for ped in self.pedestrians:
-            if math.hypot(ped.x - self.truck.x, ped.y - self.truck.y) < 120:
+            if math.hypot(ped.x - self.truck.x, ped.y - self.truck.y) < 170:
                 if self._ped_flee(ped, nx, ny):
                     n += 1
         self._log(f"检测到路口拥堵，先疏散附近行人（{n} 人）", "warning")
@@ -1726,21 +1711,22 @@ class World:
             if m["timer"] >= JAM_PED_TIME:
                 m["phase"] = "cars"
                 m["timer"] = 0.0
-                moved = self._reroute_cars_around(node)
-                self._log(f"行人已离开路口，{moved} 辆小车重新规划绕行路线", "info")
+                turned = self._turn_pedestrians_around(node)
+                aside = self._pull_cars_aside(node)
+                self._log(f"行人已掉头离开路口（{turned} 人），{aside} 辆小车靠边让行", "info")
         elif m["phase"] == "cars":
             if m["timer"] >= JAM_CAR_TIME:
                 m["phase"] = "truck"
                 m["timer"] = 0.0
                 if self.dispatch_jam_clear(node):
-                    self._log("消防车前往拥堵路口清理现场", "warning")
+                    self._log("消防车优先通过拥堵路口", "warning")
                 else:
                     self._end_jam("路口已自行疏通")
         elif m["phase"] == "truck":
             # 消防车在路上：把挡在它前面的行人继续支开，避免「车等人、人等车」
             nx, ny = self.city.road.xy[node]
             for ped in self.pedestrians:
-                if math.hypot(ped.x - self.truck.x, ped.y - self.truck.y) < 110:
+                if math.hypot(ped.x - self.truck.x, ped.y - self.truck.y) < 170:
                     self._ped_flee(ped, nx, ny)
             if self.truck.state not in ("to_jam", "clearing_jam"):
                 self._end_jam("路口清理完成，交通恢复")
@@ -1782,6 +1768,36 @@ class World:
             ped.state = "leaving"
             return True
         return False
+
+    def _turn_pedestrians_around(self, node: int) -> int:
+        """路口附近的行人原地掉头，沿原路走回去。"""
+        nx, ny = self.city.road.xy[node]
+        count = 0
+        for ped in self.pedestrians:
+            if math.hypot(ped.x - nx, ped.y - ny) >= JAM_PED_R:
+                continue
+            back = list(reversed(ped.path[:ped.idx])) if ped.idx > 0 else []
+            if len(back) >= 2:
+                ped.path = back
+                ped.idx = 1
+                ped.waiting = False
+                ped.state = "leaving"
+                count += 1
+            elif self._ped_flee(ped, nx, ny):
+                count += 1
+        return count
+
+    def _pull_cars_aside(self, node: int) -> int:
+        """让路口附近的小车靠边停下，把车道让给消防车。"""
+        nx, ny = self.city.road.xy[node]
+        count = 0
+        for car in self.cars:
+            x, y = self._car_drawn_xy(car)
+            if math.hypot(x - nx, y - ny) > 145:
+                continue
+            car.pull_aside = JAM_PULL_TIME
+            count += 1
+        return count
 
     def _reroute_cars_around(self, node: int) -> int:
         """让堵在路口附近的小车掉头、换一条绕开这个路口的路线。"""

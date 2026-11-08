@@ -140,20 +140,21 @@ def test_小车统一使用消防红的深色():
 
 
 # ---------------------------------------------------------------- 让行规则
-def test_路口遇消防车_小车停车让行():
+# ---------------------------------------------------------------- 让行规则
+def test_遇到消防车_小车靠边停车():
     w = make_world()
     car = add_car(w, 154.0, 310.0, math.pi / 2,
                   [(154.0, 380.0), (154.0, 500.0)], route_keys=(N150, N380, N265))
-    dispatch_truck(w, 154.0, 390.0)            # 正在通过前方路口
-    advance(w, 1.0)
-    assert car.state == "yield_intersection"
-    assert car.speed == 0.0
+    dispatch_truck(w, 154.0, 390.0)            # 前方有消防车
+    advance(w, 2.0)
+    assert car.state == "yield_roadside"
+    assert car.side > 0.5
+    assert car.speed < 1.0
 
 
-def test_路口让行时消防车优先通过():
+def test_让行时消防车优先通过():
     w = make_world()
     w.pedestrians = []                          # 排除行人降速干扰
-    # 小车在纵向路口外等，消防车横穿同一个路口：小车停住，消防车满速通过
     car = add_car(w, 154.0, 310.0, math.pi / 2,
                   [(154.0, 380.0), (154.0, 500.0)], route_keys=(N150, N380, N265))
     w.truck.state = "ai_mission"
@@ -162,7 +163,7 @@ def test_路口让行时消防车优先通过():
     w.truck.waypoints = [(300.0, 380.0)]
     w.truck.wp_index = 0
     advance(w, 1.0)
-    assert car.state == "yield_intersection"
+    assert car.state == "yield_roadside"
     assert w.truck.speed == BASE_SPEED
     assert w.truck.slowing is False
 
@@ -194,16 +195,15 @@ def test_消防车通过后小车恢复行驶():
     assert car.side < 0.01
 
 
-def test_同侧前方消防车停下_小车停车等待():
+def test_同侧前方消防车停下_小车靠边等待():
     w = make_world()
     car = add_car(w, 154.0, 215.0, math.pi / 2,
                   [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
     park_truck(w, 154.0, 300.0, state="idle")
     advance(w, 4.0)
-    assert car.state == "wait_truck"
+    assert car.state == "yield_roadside"
     assert car.speed == 0.0
     assert car.y < 300.0
-    assert 300.0 - car.y <= CAR_WAIT_GAP + 40
 
 
 def test_消防车重新起步后小车跟上():
@@ -212,11 +212,9 @@ def test_消防车重新起步后小车跟上():
                   [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
     park_truck(w, 154.0, 300.0, state="idle")
     advance(w, 4.0)
-    assert car.state == "wait_truck"
+    assert car.state == "yield_roadside"
 
-    dispatch_truck(w, 154.0, 300.0)
-    w.truck.waypoints = [(154.0, 300.0), (154.0, 500.0), (154.0, 620.0)]
-    w.truck.wp_index = 0
+    w.truck.x, w.truck.y = 900.0, 700.0
     saw_driving = False
     for _ in range(60):
         w.update(0.1)
@@ -290,6 +288,7 @@ def test_跟车会减速避免追尾():
 # ---------------------------------------------------------------- 行人与会车
 def test_小车会为前方行人停车():
     w = make_world()
+    park_truck(w, 900.0, 700.0, state="idle")
     car = add_car(w, 154.0, 300.0, math.pi / 2, [(154.0, 380.0), (154.0, 500.0)])
     ped = w.pedestrians[0]
     ped.x, ped.y = 154.0, 352.0                # 车头前方 52 单位
@@ -368,15 +367,15 @@ def test_疏通时先疏散行人():
     assert after > before + 10                  # 行人被支开，离路口更远了
 
 
-def test_疏通时小车绕开堵住的路口():
+def test_疏通时小车靠边让行():
     w, node = _jam_scene()
     advance(w, 6.0)
     assert w.jam is not None and w.jam["phase"] in ("cars", "truck")
     nx, ny = w.city.road.xy[node]
-    for car in w.cars:
-        x, y = drawn(w, car)
-        if math.hypot(x - nx, y - ny) < 145:       # 堵在路口的车才需要换路
-            assert node not in car.route
+    near = [c for c in w.cars
+            if math.hypot(*[a - b for a, b in zip(drawn(w, c), (nx, ny))]) < 145]
+    assert near
+    assert any(c.pull_aside > 0 or c.side > 0.5 for c in near)   # 靠边了
 
 
 def test_消防车前往清理并结束任务():
