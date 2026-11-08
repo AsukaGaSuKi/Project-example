@@ -169,6 +169,14 @@ class CityMap:
             for a, b in zip(nodes, nodes[1:]):
                 self.road.add_edge(a, b, "road")
 
+    def is_intersection(self, node: int) -> bool:
+        """道路节点是否落在路口（三纵三横的交点）。"""
+        if node < 0 or node >= len(self.road.xy):
+            return False
+        x, y = self.road.xy[node]
+        return (any(abs(x - v) < 0.5 for v in self.V_ROADS)
+                and any(abs(y - h) < 0.5 for h in self.H_ROADS))
+
     def nearest_road_node(self, x: float, y: float) -> int:
         """离 (x, y) 最近的道路节点，作为一次寻路的起点。"""
         best, best_d = 0, float("inf")

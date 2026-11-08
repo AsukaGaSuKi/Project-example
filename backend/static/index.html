@@ -255,9 +255,10 @@
     </div>
 
     <div class="card legend">
-      <b>图例：</b><span class="emoji">🚒</span> 消防车　<span class="emoji">🚶</span> 行人　<span class="emoji">🔥</span> 火情　<span class="emoji">🚧</span> 路障<br>
+      <b>图例：</b><span class="emoji">🚒</span> 消防车　<span class="emoji">🚗</span> 私家车　<span class="emoji">🚶</span> 行人　<span class="emoji">🔥</span> 火情　<span class="emoji">🚧</span> 路障<br>
       <span class="emoji">💧</span> 补水站　<span class="emoji">🔧</span> 维修站　信号灯：左点 N=南北，右点 E=东西<br>
-      <b>规则：</b>行人只走人行道与斑马线；红灯在路口等待；小车遇行人降速，遇路障停车用机械臂移除。
+      <b>规则：</b>行人只走人行道与斑马线；红灯在路口等待；小车遇行人降速，遇路障停车用机械臂移除。<br>
+      <b>让行：</b>私家车最多两辆，路口遇消防车停车让行，其他路段靠边避让。
     </div>
   </aside>
 </div>
@@ -476,6 +477,37 @@ function drawFire(f, now){
   ctx.beginPath(); ctx.arc(f.x,f.y,26,-Math.PI/2,-Math.PI/2 + Math.PI*2*(f.intensity/100)); ctx.stroke();
 }
 
+function drawCar(c){
+  const x = c.x, y = c.y, h = c.heading || 0;
+  const yielding = c.state && c.state !== 'driving';
+
+  // 车身阴影
+  ctx.fillStyle = 'rgba(0,0,0,.35)';
+  ctx.beginPath(); ctx.ellipse(x+2, y+6, 14, 9, h, 0, Math.PI*2); ctx.fill();
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(h + Math.PI);
+  ctx.font = '24px ' + EMOJI_FONT;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('🚗', 0, 0);
+  ctx.restore();
+
+  // 让行标记：路口让行 / 路侧避让
+  if (yielding){
+    const label = c.state === 'yield_intersection' ? '路口让行' : '路侧避让';
+    ctx.save();
+    ctx.fillStyle = c.state === 'yield_intersection' ? 'rgba(251,191,36,.92)' : 'rgba(52,211,153,.92)';
+    ctx.font = '10px "Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const w = ctx.measureText(label).width + 12;
+    roundRect(ctx, x - w/2, y - 40, w, 16, 8); ctx.fill();
+    ctx.fillStyle = '#0b1220';
+    ctx.fillText(label, x, y - 32);
+    ctx.restore();
+  }
+}
+
 function drawPed(p){
   ctx.save();
   ctx.font = '23px ' + EMOJI_FONT;
@@ -606,6 +638,15 @@ function drawScene(now){
     drawPed({ ...p, x, y });
   }
 
+  // 私家车（位置插值）：路口让行 / 路侧避让
+  for (const c of (s.cars || [])){
+    const old = findPrev('cars', c.id);
+    const x = old ? lerp(old.x, c.x, alpha) : c.x;
+    const y = old ? lerp(old.y, c.y, alpha) : c.y;
+    const ch = old ? lerpAngle(old.heading, c.heading, alpha) : c.heading;
+    drawCar({ ...c, x, y, heading: ch });
+  }
+
   // 消防车
   const t = s.truck;
   const oldT = a ? a.truck : null;
@@ -717,9 +758,12 @@ function renderState(s){
   $('stateText').textContent = STATE_NAMES[t.state] || t.state;
   $('speedText').textContent = '速度 ' + t.speed.toFixed(1) + (t.slowing ? ' · 行人慢行' : '');
 
+  const cars = s.cars || [];
+  const yielding = cars.filter(c => c.state !== 'driving').length;
   $('statsText').innerHTML =
     `灭火 ${s.stats.fires_out} ｜ 补水 ${s.stats.refills}<br>` +
-    `维修 ${s.stats.repairs} ｜ 清障 ${s.stats.obstacles_cleared}`;
+    `维修 ${s.stats.repairs} ｜ 清障 ${s.stats.obstacles_cleared}<br>` +
+    `路上小车 ${cars.length}/2${yielding ? ` ｜ 让行 ${yielding}` : ''}`;
 
   // 自检面板
   const sc = s.self_check;

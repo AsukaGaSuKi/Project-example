@@ -6,7 +6,8 @@
 - 功能故障自动前往最近维修站；
 - 行驶中遇到路障，停车用机械臂清障；
 - 遇到行人自动降速慢行，行人通过后恢复；
-- 行人随机生成，走人行道、过斑马线并遵守红绿灯。
+- 行人随机生成，走人行道、过斑马线并遵守红绿灯；
+- 路网随机刷新私家车（最多两辆），路口遇消防车停车让行、其他路段靠边避让。
 
 所有状态由后端统一维护，update(dt) 是唯一推进仿真时间的入口，便于测试。
 """
@@ -35,6 +36,25 @@ REPAIR_TIME = 4.0
 SELF_CHECK_STEP = 0.38   # 每个自检项目耗时
 AI_SCAN_TIME = 1.4       # AI 巡检点在点停留时间（秒）
 AI_ARRIVE = 42.0         # 判定「到达停靠点」的距离
+
+# ---- 私家车（NPC）：随机刷新，最多两辆，给消防车让行 ----
+CAR_MAX = 2              # 路网同时存在的私家车上限
+CAR_SPEED_MIN = 52.0     # 私家车巡航速度区间（比消防车慢，便于被追上时让行）
+CAR_SPEED_MAX = 68.0
+CAR_ACCEL = 90.0
+CAR_BRAKE = 160.0
+CAR_TURN = 3.2
+CAR_SPAWN_MIN = 4.0      # 两次刷新的间隔
+CAR_SPAWN_MAX = 9.0
+CAR_SPAWN_CLEAR = 90.0   # 出生点离消防车的最小距离
+CAR_ROUTE_MIN = 320.0    # 优先给私家车派一条够长的路线，避免刚刷出来就到终点
+CAR_YIELD_DIST = 150.0   # 消防车进入这个范围，私家车开始让行
+CAR_CLEAR_DIST = 190.0   # 消防车退出这个范围，让行解除（带回滞，避免抖动）
+CAR_INTERSECTION_DIST = 78.0   # 离路口多近算「在路口」
+CAR_PULL_OVER = 14.0     # 路侧避让时向路缘平移的距离
+CAR_SIDE_RATE = 26.0     # 横向平移速度
+
+CAR_COLORS = ("#e2e8f0", "#f59e0b", "#38bdf8", "#a78bfa", "#f472b6", "#34d399")
 
 FAULT_NAMES = {
     "arm": "机械臂",
@@ -106,6 +126,29 @@ class Pedestrian:
     state: str = "walking"
 
 
+@dataclass
+class NpcCar:
+    """路网上的私家车：只负责交通，不参与消防任务，遇消防车要让行。"""
+
+    id: int
+    x: float
+    y: float
+    heading: float
+    cruise: float
+    color: str
+    route: list[int] = field(default_factory=list)
+    waypoints: list[tuple[float, float]] = field(default_factory=list)
+    wp_index: int = 0
+    speed: float = 0.0
+    state: str = "driving"          # driving / yield_intersection / yield_roadside
+    side: float = 0.0               # 路侧避让时向路缘平移的距离（只影响绘制位置）
+    target_node: int | None = None
+
+    @property
+    def yielding(self) -> bool:
+        return self.state != "driving"
+
+
 class World:
     def __init__(self, auto_spawn: bool = True, seed: int | None = None):
         self.rng = random.Random(seed)
@@ -116,6 +159,7 @@ class World:
         self.fires: list[Fire] = []
         self.obstacles: list[Obstacle] = []
         self.pedestrians: list[Pedestrian] = []
+        self.cars: list[NpcCar] = []
         self.events: list[dict] = []
         self.stats = {
             "fires_out": 0,
@@ -130,16 +174,21 @@ class World:
         self._next_fire_id = 1
         self._next_obstacle_id = 1
         self._next_ped_id = 1
+        self._next_car_id = 1
         self._check_index = 0
         self._check_timer = 0.0
         self._repair_timer = 0.0
         self._fire_timer = 6.0
         self._obstacle_timer = 18.0
         self._fault_timer = 45.0
+        self._car_timer = 2.0        # 第一辆私家车稍早出现，方便演示
         self.self_check = self._empty_self_check()
         self._log("系统启动，消防小车在待命点完成初始化", "info")
         for _ in range(10):
             self._spawn_pedestrian()
+        if auto_spawn:
+            for _ in range(CAR_MAX):
+                self.spawn_car()
 
     # ------------------------------------------------------------------ 基础工具
     @staticmethod
@@ -184,6 +233,7 @@ class World:
         self._update_pedestrians(dt)
         self._update_self_check(dt)
         self._update_truck(dt)
+        self._update_cars(dt)
         if self.auto_spawn:
             self._update_spawners(dt)
 
@@ -203,6 +253,11 @@ class World:
             if self.truck.fault is None:
                 self.inject_fault()
             self._fault_timer = self.rng.uniform(40, 65)
+        self._car_timer -= dt
+        if self._car_timer <= 0:
+            if len(self.cars) < CAR_MAX:
+                self.spawn_car()
+            self._car_timer = self.rng.uniform(CAR_SPAWN_MIN, CAR_SPAWN_MAX)
 
     # ------------------------------------------------------------------ 车辆逻辑
     def _update_truck(self, dt: float) -> None:
@@ -1014,6 +1069,144 @@ class World:
             ped.x += dx / dist * step
             ped.y += dy / dist * step
 
+    # ------------------------------------------------------------------ 私家车（NPC）
+    def spawn_car(self) -> dict:
+        """在路网随机位置刷一辆私家车，最多同时 CAR_MAX 辆。"""
+        if len(self.cars) >= CAR_MAX:
+            return {"ok": False, "msg": f"路上最多 {CAR_MAX} 辆小车"}
+        nodes = self.city.road.xy
+        fallback = None
+        for _attempt in range(24):
+            start = self.rng.randrange(len(nodes))
+            goal = self.rng.randrange(len(nodes))
+            if start == goal:
+                continue
+            sx, sy = nodes[start]
+            if self._dist(sx, sy, self.truck.x, self.truck.y) < CAR_SPAWN_CLEAR:
+                continue
+            if any(self._dist(sx, sy, c.x, c.y) < 70 for c in self.cars):
+                continue
+            route = graph_astar(self.city.road.adj, start, goal, nodes)
+            if len(route) < 3:
+                continue
+            waypoints = self._lane_waypoints(route)
+            if not waypoints:
+                continue
+            length = sum(self._dist(*nodes[a], *nodes[b])
+                         for a, b in zip(route, route[1:]))
+            if length >= CAR_ROUTE_MIN:
+                return self._add_car(start, route, waypoints)
+            if fallback is None:
+                fallback = (start, route, waypoints)
+        if fallback is not None:
+            return self._add_car(*fallback)
+        return {"ok": False, "msg": "暂时没有合适的出生点"}
+
+    def _add_car(self, start: int, route: list[int],
+                 waypoints: list[tuple[float, float]]) -> dict:
+        sx, sy = self.city.road.xy[start]
+        car = NpcCar(
+            id=self._next_car_id, x=sx, y=sy,
+            heading=math.atan2(waypoints[0][1] - sy, waypoints[0][0] - sx),
+            cruise=self.rng.uniform(CAR_SPEED_MIN, CAR_SPEED_MAX),
+            color=self.rng.choice(CAR_COLORS),
+            route=route, waypoints=waypoints, target_node=route[-1],
+        )
+        self._next_car_id += 1
+        self.cars.append(car)
+        self._log(f"路网随机出现一辆小车 #{car.id}（当前 {len(self.cars)}/{CAR_MAX} 辆）", "info")
+        return {"ok": True, "car_id": car.id}
+
+    def _truck_busy(self) -> bool:
+        """消防车是否正在出车途中；只有出车时私家车才需要让行。"""
+        return self.truck.state in ("to_fire", "to_refill", "to_repair", "ai_mission")
+
+    def _update_cars(self, dt: float) -> None:
+        arrived: list[NpcCar] = []
+        for car in self.cars:
+            self._car_yield(car)
+            self._car_drive(car, dt)
+            if car.wp_index >= len(car.waypoints):
+                arrived.append(car)
+        for car in arrived:
+            self.cars = [c for c in self.cars if c.id != car.id]
+            self._log(f"小车 #{car.id} 抵达目的地，驶离路网", "info")
+        if arrived:
+            # 走掉一辆就尽快补一辆，路口不至于长时间空着
+            self._car_timer = min(self._car_timer, self.rng.uniform(1.5, 3.5))
+
+    def _car_yield(self, car: NpcCar) -> None:
+        """让行判定：在路口就停在路口外，不在路口就靠边停车。
+
+        只有消防车正在出车（赶赴火场 / 补水 / 维修 / AI 任务）时才让行，
+        停着的消防车不会把小车永久堵在路上。
+        """
+        dist = self._dist(car.x, car.y, self.truck.x, self.truck.y)
+        limit = CAR_CLEAR_DIST if car.yielding else CAR_YIELD_DIST
+        if not self._truck_busy() or dist > limit:
+            car.state = "driving"
+            return
+        if self._intersection_ahead(car) is not None:
+            car.state = "yield_intersection"     # 路口让行：停车，等消防车先过
+        else:
+            car.state = "yield_roadside"         # 非路口：向路缘避让
+
+    def _intersection_ahead(self, car: NpcCar) -> int | None:
+        """车辆正前方最近的路口；只有进入 CAR_INTERSECTION_DIST 才算「在路口」。"""
+        for node in car.route[car.wp_index + 1:]:
+            if not self.city.is_intersection(node):
+                continue
+            nx, ny = self.city.road.xy[node]
+            if self._dist(car.x, car.y, nx, ny) <= CAR_INTERSECTION_DIST:
+                return node
+            return None                          # 最近的路口还远，后面的更不用看
+        return None
+
+    def _car_target_speed(self, car: NpcCar) -> float:
+        if car.state == "yield_intersection":
+            return 0.0
+        if car.state == "yield_roadside":
+            # 先减速向路缘靠，贴边后停住
+            return 0.0 if car.side >= CAR_PULL_OVER - 0.5 else min(car.cruise, 30.0)
+        return car.cruise
+
+    def _car_drive(self, car: NpcCar, dt: float) -> None:
+        target_speed = self._car_target_speed(car)
+        if car.wp_index < len(car.waypoints):
+            tx, ty = car.waypoints[car.wp_index]
+            dx, dy = tx - car.x, ty - car.y
+            dist = math.hypot(dx, dy)
+            if dist < 12:
+                car.wp_index += 1
+            elif dist > 0:
+                desired = math.atan2(dy, dx)
+                diff = (desired - car.heading + math.pi) % (2 * math.pi) - math.pi
+                if abs(diff) > 0.95:
+                    target_speed = min(target_speed, 26.0)
+                if car.speed > 3:
+                    car.heading += max(-CAR_TURN * dt, min(CAR_TURN * dt, diff))
+        else:
+            target_speed = 0.0
+
+        if car.speed < target_speed:
+            car.speed = min(target_speed, car.speed + CAR_ACCEL * dt)
+        else:
+            car.speed = max(target_speed, car.speed - CAR_BRAKE * dt)
+
+        car.x += math.cos(car.heading) * car.speed * dt
+        car.y += math.sin(car.heading) * car.speed * dt
+        car.heading = (car.heading + math.pi) % (2 * math.pi) - math.pi
+        car.x = max(10.0, min(self.city.WIDTH - 10.0, car.x))
+        car.y = max(10.0, min(self.city.HEIGHT - 10.0, car.y))
+
+        # 路侧避让：朝路缘平移；消防车过去后回到车道
+        want = CAR_PULL_OVER if car.state == "yield_roadside" else 0.0
+        step = CAR_SIDE_RATE * dt
+        if car.side < want:
+            car.side = min(want, car.side + step)
+        elif car.side > want:
+            car.side = max(want, car.side - step)
+
     # ------------------------------------------------------------------ 查询
     def _fire_by_id(self, fire_id: int | None) -> Fire | None:
         if fire_id is None:
@@ -1056,6 +1249,17 @@ class World:
                 {"id": p.id, "x": round(p.x, 1), "y": round(p.y, 1),
                  "emoji": p.emoji, "state": p.state}
                 for p in self.pedestrians
+            ],
+            "cars": [
+                {"id": c.id,
+                 # 路侧避让时把横向平移算进绘制坐标
+                 "x": round(c.x - math.sin(c.heading) * c.side, 1),
+                 "y": round(c.y + math.cos(c.heading) * c.side, 1),
+                 "heading": round(c.heading, 3),
+                 "speed": round(c.speed, 1),
+                 "state": c.state,
+                 "color": c.color}
+                for c in self.cars
             ],
             "fires": [
                 {"id": f.id, "x": round(f.x, 1), "y": round(f.y, 1),
