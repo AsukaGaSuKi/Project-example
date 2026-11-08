@@ -1129,9 +1129,12 @@ class World:
 
     def _new_ped_route(self, ped: Pedestrian) -> None:
         goal = self.city.random_ped_node(self.rng)
-        start = self.city.ped_nodes.get((round(ped.x, 1), round(ped.y, 1)))
-        if start is None:
-            start = self.city.random_ped_node(self.rng)
+        # 从「正在走向的那个节点」接着走；没有才取最近节点。
+        # 绝不凭空跳到一个随机节点，否则就等于横穿马路。
+        if ped.idx < len(ped.path):
+            start = ped.path[ped.idx]
+        else:
+            start = self.city.nearest_ped_node(ped.x, ped.y)
         path = self.city.ped_route(start, goal)
         if len(path) < 2:
             return
@@ -1861,9 +1864,11 @@ class World:
         return count
 
     def _ped_flee(self, ped: Pedestrian, nx: float, ny: float) -> bool:
-        start = self.city.ped_nodes.get((round(ped.x, 1), round(ped.y, 1)))
-        if start is None:
-            start = self.city.random_ped_node(self.rng)
+        # 从「正在走的那条路的节点」接上，不能凭空跳到别处横穿马路
+        if ped.idx < len(ped.path):
+            start = ped.path[ped.idx]
+        else:
+            start = self.city.nearest_ped_node(ped.x, ped.y)
         for _attempt in range(10):
             goal = self.city.random_ped_node(self.rng)
             gx, gy = self.city.ped.xy[goal]

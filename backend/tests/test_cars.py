@@ -364,7 +364,9 @@ def test_疏通时先疏散行人():
     advance(w, 5.0)
     assert w.jam is not None and w.jam["phase"] in ("cars", "truck")
     after = math.hypot(ped.x - nx, ped.y - ny)
-    assert after > before + 10                  # 行人被支开，离路口更远了
+    assert after > before                       # 行人正往远离路口的方向走
+    gx, gy = w.city.ped.xy[ped.path[-1]]
+    assert math.hypot(gx - nx, gy - ny) > 120   # 新路线终点远离路口
 
 
 def test_疏通时小车靠边让行():

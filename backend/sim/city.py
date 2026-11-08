@@ -231,6 +231,14 @@ class CityMap:
                     edge(node(X + dx, self.H_ROADS[j] + off),
                          node(X + dx, self.H_ROADS[j + 1] - off), "walk")
 
+    def nearest_ped_node(self, x: float, y: float) -> int:
+        """离 (x, y) 最近的人行节点（保证行人不会为了接新路线横穿马路）。"""
+        best, best_d = 0, float("inf")
+        for nid, (nx, ny) in enumerate(self.ped.xy):
+            d = (nx - x) ** 2 + (ny - y) ** 2
+            if d < best_d:
+                best, best_d = nid, d
+        return best
     def random_ped_node(self, rng: random.Random) -> int:
         return rng.randrange(len(self.ped.xy))
 

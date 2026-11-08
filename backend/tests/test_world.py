@@ -172,3 +172,50 @@ def test_自检流程包含六个可视化项目():
     assert w.self_check["running"] is False
     assert w.self_check["passed"] is True
     assert w.self_check["progress"] == 1.0
+
+def _ped_edges(world):
+    edges = []
+    for a, nbrs in world.city.ped.adj.items():
+        for b, _ in nbrs:
+            if a < b:
+                edges.append((world.city.ped.xy[a], world.city.ped.xy[b]))
+    return edges
+
+
+def _dist_to_seg(p, a, b):
+    (px, py), (x1, y1), (x2, y2) = p, a, b
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 == 0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def test_行人只在人行道和斑马线上走():
+    w = make_world(seed=21)
+    edges = _ped_edges(w)
+    for _ in range(600):                       # 60 秒
+        w.update(0.1)
+        for ped in w.pedestrians:
+            best = min(_dist_to_seg((ped.x, ped.y), a, b) for a, b in edges)
+            assert best < 3.0, best
+
+
+def test_行人过街只走斑马线():
+    from sim.city import CityMap
+    w = make_world(seed=22)
+    road_in = 0
+    for _ in range(600):
+        w.update(0.1)
+        for ped in w.pedestrians:
+            kind = ""
+            if 0 < ped.idx < len(ped.path):
+                kind = w.city.ped_edge_kind.get((ped.path[ped.idx - 1], ped.path[ped.idx]), "")
+            if kind in ("cross_ew", "cross_ns"):
+                continue                        # 正在走斑马线，允许在车行道上
+            dx = min(abs(ped.x - v) for v in CityMap.V_ROADS)
+            dy = min(abs(ped.y - h) for h in CityMap.H_ROADS)
+            if min(dx, dy) < 36:
+                road_in += 1
+    assert road_in == 0
