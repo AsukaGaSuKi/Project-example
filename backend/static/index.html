@@ -502,17 +502,21 @@ function drawCar(c){
   roundRect(ctx, 10, 2.5, 2.4, 3, 1); ctx.fill();
   ctx.restore();
 
-  // 让行标记：路口让行 / 路侧避让
+  // 让行标记：路口让行 / 路侧避让 / 借道绕行
   if (yielding){
-    const label = c.state === 'yield_intersection' ? '路口让行' : '路侧避让';
+    const badge = c.state === 'yield_intersection'
+      ? { text: '路口让行', bg: 'rgba(251,191,36,.92)' }
+      : c.state === 'bypass'
+      ? { text: '借道绕行', bg: 'rgba(56,189,248,.92)' }
+      : { text: '路侧避让', bg: 'rgba(52,211,153,.92)' };
     ctx.save();
-    ctx.fillStyle = c.state === 'yield_intersection' ? 'rgba(251,191,36,.92)' : 'rgba(52,211,153,.92)';
+    ctx.fillStyle = badge.bg;
     ctx.font = '10px "Microsoft YaHei",sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const w = ctx.measureText(label).width + 12;
+    const w = ctx.measureText(badge.text).width + 12;
     roundRect(ctx, x - w/2, y - 40, w, 16, 8); ctx.fill();
     ctx.fillStyle = '#0b1220';
-    ctx.fillText(label, x, y - 32);
+    ctx.fillText(badge.text, x, y - 32);
     ctx.restore();
   }
 }

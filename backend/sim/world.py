@@ -7,7 +7,7 @@
 - 行驶中遇到路障，停车用机械臂清障；
 - 遇到行人自动降速慢行，行人通过后恢复；
 - 行人随机生成，走人行道、过斑马线并遵守红绿灯；
-- 路网常驻四辆私家车，路口遇消防车停车让行、其他路段靠边避让。
+- 路网常驻四辆私家车：路口让行、靠边避让、借道绕行，任何时候都与消防车和其它小车保持间距。
 
 所有状态由后端统一维护，update(dt) 是唯一推进仿真时间的入口，便于测试。
 """
@@ -49,7 +49,10 @@ CAR_ROUTE_MIN = 320.0    # 优先给私家车派一条够长的路线，避免�
 CAR_YIELD_DIST = 150.0   # 消防车进入这个范围，私家车开始让行
 CAR_CLEAR_DIST = 190.0   # 消防车退出这个范围，让行解除（带回滞，避免抖动）
 CAR_INTERSECTION_DIST = 78.0   # 离路口多近算「在路口」
-CAR_PULL_OVER = 14.0     # 路侧避让时向路缘平移的距离
+CAR_PULL_OVER = 30.0     # 让行时向路肩平移的距离（消防车很宽，要让到路肩才不重叠）
+CAR_BYPASS = 36.0        # 绕行停着的消防车时，向对向车道平移的距离
+CAR_MIN_GAP = 34.0       # 小车与消防车中心的最小间距（硬约束，杜绝重叠）
+CAR_CAR_GAP = 30.0       # 两辆小车中心的最小间距（硬约束，杜绝重叠）
 CAR_SIDE_RATE = 26.0     # 横向平移速度
 
 # 车身颜色：与消防车同款的深红，只做细微深浅区分
@@ -1133,6 +1136,7 @@ class World:
                 if car.retry <= 0:
                     car.retry = 1.0
                     self._car_new_route(car)
+        self._resolve_overlaps()
 
     def _car_new_route(self, car: NpcCar) -> bool:
         """给常驻小车换一条新路线：从当前位置最近的节点出发，随机挑一个终点。"""
@@ -1155,21 +1159,55 @@ class World:
             return True
         return False
 
-    def _car_yield(self, car: NpcCar) -> None:
-        """让行判定：在路口就停在路口外，不在路口就靠边停车。
+    def _truck_oncoming(self, car: NpcCar) -> bool:
+        """消防车是不是迎面驶来（车头方向大致相反）。"""
+        diff = (self.truck.heading - car.heading + math.pi) % (2 * math.pi) - math.pi
+        return abs(diff) > 1.75
 
-        只有消防车正在出车（赶赴火场 / 补水 / 维修 / AI 任务）时才让行，
-        停着的消防车不会把小车永久堵在路上。
+    def _car_drawn_xy(self, car: NpcCar) -> tuple[float, float]:
+        """小车的实际绘制位置（车道位置 + 横向让行偏移）。"""
+        return (car.x - math.sin(car.heading) * car.side,
+                car.y + math.cos(car.heading) * car.side)
+
+    def _car_yield(self, car: NpcCar) -> None:
+        """让行判定：目标是「两车任何时候都不重叠」。
+
+        - 消防车迎面开来 / 从后方追上来：小车靠到路肩停下，等它过去；
+        - 消防车在前方同车道（停着补水、维修、灭火，或走得比小车慢）：借对向车道绕过去；
+        - 前方就是路口且消防车正在出车：停在路口外，让它先过；
+        - 消防车在另一条路上（横向错开）：各走各的，不用让。
         """
-        dist = self._dist(car.x, car.y, self.truck.x, self.truck.y)
+        cx, cy = self._car_drawn_xy(car)
+        dx, dy = self.truck.x - cx, self.truck.y - cy
+        dist = math.hypot(dx, dy)
         limit = CAR_CLEAR_DIST if car.yielding else CAR_YIELD_DIST
-        if not self._truck_busy() or dist > limit:
+        if dist > limit:
             car.state = "driving"
             return
-        if self._intersection_ahead(car) is not None:
-            car.state = "yield_intersection"     # 路口让行：停车，等消防车先过
+
+        rel = (math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi
+        ahead_dist = dist * math.cos(rel)          # > 0：在车头前方
+        side_dist = abs(dist * math.sin(rel))      # 横向错开的距离
+        if side_dist > 36:
+            car.state = "driving"                  # 不在同一车道上，互不相干
+            return
+
+        if ahead_dist > 10:
+            if self._truck_oncoming(car):
+                car.state = "yield_roadside"       # 迎面来车：靠边停，让出车道
+            elif self._truck_busy() and self._intersection_ahead(car) is not None:
+                car.state = "yield_intersection"   # 路口：停在路口外等它先过
+            elif not self._truck_busy() or self.truck.speed < 20:
+                car.state = "bypass"               # 前方有停着的消防车：借道绕行
+            else:
+                car.state = "driving"              # 它在前方且比小车快：跟着走
         else:
-            car.state = "yield_roadside"         # 非路口：向路缘避让
+            if self._truck_busy():
+                car.state = "yield_roadside"       # 从后方追上来：靠边让行
+            elif car.state == "bypass" and ahead_dist > -40:
+                car.state = "bypass"               # 还没完全超过去，继续借道
+            else:
+                car.state = "driving"
 
     def _intersection_ahead(self, car: NpcCar) -> int | None:
         """车辆正前方最近的路口；只有进入 CAR_INTERSECTION_DIST 才算「在路口」。"""
@@ -1182,16 +1220,26 @@ class World:
             return None                          # 最近的路口还远，后面的更不用看
         return None
 
+    def _car_target_side(self, car: NpcCar) -> float:
+        """让行时的横向目标：+ 靠路肩、- 借对向车道。"""
+        if car.state == "yield_roadside":
+            return CAR_PULL_OVER
+        if car.state == "bypass":
+            return -CAR_BYPASS
+        return 0.0
+
     def _car_target_speed(self, car: NpcCar) -> float:
         if car.state == "yield_intersection":
             return 0.0
         if car.state == "yield_roadside":
-            # 先减速向路缘靠，贴边后停住
+            # 先减速向路肩靠，贴边后停住
             return 0.0 if car.side >= CAR_PULL_OVER - 0.5 else min(car.cruise, 30.0)
+        if car.state == "bypass":
+            return min(car.cruise, 42.0)          # 借道时减速通过
         return car.cruise
 
     def _car_drive(self, car: NpcCar, dt: float) -> None:
-        target_speed = self._car_target_speed(car)
+        target_speed = min(self._car_target_speed(car), self._car_follow_speed(car))
         if car.wp_index < len(car.waypoints):
             tx, ty = car.waypoints[car.wp_index]
             dx, dy = tx - car.x, ty - car.y
@@ -1219,13 +1267,93 @@ class World:
         car.x = max(10.0, min(self.city.WIDTH - 10.0, car.x))
         car.y = max(10.0, min(self.city.HEIGHT - 10.0, car.y))
 
-        # 路侧避让：朝路缘平移；消防车过去后回到车道
-        want = CAR_PULL_OVER if car.state == "yield_roadside" else 0.0
+        # 横向让行：靠路肩（+）或借对向车道（-），让完自动回正
+        want = self._car_target_side(car)
         step = CAR_SIDE_RATE * dt
         if car.side < want:
             car.side = min(want, car.side + step)
         elif car.side > want:
             car.side = max(want, car.side - step)
+
+        # 重叠由 _update_cars 末尾的 _resolve_overlaps() 统一消解
+
+    def _car_follow_speed(self, car: NpcCar) -> float:
+        """跟车：同一车道前方有别的车，就按车距减速，避免追尾重叠。"""
+        cap = car.cruise
+        cx, cy = self._car_drawn_xy(car)
+        for other in self.cars:
+            if other.id == car.id:
+                continue
+            ox, oy = self._car_drawn_xy(other)
+            dx, dy = ox - cx, oy - cy
+            dist = math.hypot(dx, dy)
+            if dist > 80 or dist < 0.1:
+                continue
+            rel = (math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi
+            if abs(dist * math.sin(rel)) > 26:
+                continue                       # 不在同一车道，互不影响
+            gap = dist * math.cos(rel)
+            if gap <= 0:
+                continue                       # 在自己后面
+            if gap < CAR_CAR_GAP + 6:
+                return 0.0                     # 贴得太近：停车
+            if gap < 60:
+                cap = min(cap, 22.0)
+            else:
+                cap = min(cap, max(other.speed, 24.0))
+        return cap
+
+    def _resolve_overlaps(self) -> None:
+        """全局消解重叠：小车之间、小车与消防车之间都不允许重叠。
+
+        每次迭代把所有过近的车对推开一点，几轮之后收敛；
+        消防车是优先车辆，只推小车、不推它。
+        """
+        for _ in range(8):
+            moved = False
+            # 小车之间：各退一半
+            for i in range(len(self.cars)):
+                a = self.cars[i]
+                ax, ay = self._car_drawn_xy(a)
+                for j in range(i + 1, len(self.cars)):
+                    b = self.cars[j]
+                    bx, by = self._car_drawn_xy(b)
+                    dx, dy = ax - bx, ay - by
+                    d = math.hypot(dx, dy)
+                    if d >= CAR_CAR_GAP:
+                        continue
+                    if d < 1e-3:
+                        dx, dy, d = 1.0, 0.0, 1.0
+                    push = (CAR_CAR_GAP - d) / 2.0
+                    a.x += dx / d * push
+                    a.y += dy / d * push
+                    b.x -= dx / d * push
+                    b.y -= dy / d * push
+                    a.speed = min(a.speed, 12.0)
+                    b.speed = min(b.speed, 12.0)
+                    ax, ay = self._car_drawn_xy(a)
+                    bx, by = self._car_drawn_xy(b)
+                    moved = True
+            # 小车与消防车：只把小车推开
+            for car in self.cars:
+                cx, cy = self._car_drawn_xy(car)
+                dx, dy = cx - self.truck.x, cy - self.truck.y
+                d = math.hypot(dx, dy)
+                if d >= CAR_MIN_GAP:
+                    continue
+                if d < 1e-3:
+                    dx, dy, d = 1.0, 0.0, 1.0
+                push = CAR_MIN_GAP - d
+                car.x += dx / d * push
+                car.y += dy / d * push
+                car.speed = min(car.speed, 12.0)
+                moved = True
+            if not moved:
+                return
+        # 兜底：别把车推到地图外
+        for car in self.cars:
+            car.x = max(10.0, min(self.city.WIDTH - 10.0, car.x))
+            car.y = max(10.0, min(self.city.HEIGHT - 10.0, car.y))
 
     # ------------------------------------------------------------------ 查询
     def _fire_by_id(self, fire_id: int | None) -> Fire | None:
@@ -1273,9 +1401,9 @@ class World:
             ],
             "cars": [
                 {"id": c.id,
-                 # 路侧避让时把横向平移算进绘制坐标
-                 "x": round(c.x - math.sin(c.heading) * c.side, 1),
-                 "y": round(c.y + math.cos(c.heading) * c.side, 1),
+                 # 绘制坐标已含横向让行偏移
+                 "x": round(self._car_drawn_xy(c)[0], 1),
+                 "y": round(self._car_drawn_xy(c)[1], 1),
                  "heading": round(c.heading, 3),
                  "speed": round(c.speed, 1),
                  "state": c.state,

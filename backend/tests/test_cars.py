@@ -1,6 +1,7 @@
-"""私家车（NPC）测试：常驻数量、自动接续路线、路口让行、路侧避让与消防车优先。
+"""私家车（NPC）测试：常驻数量、自动接续、路口让行、借道绕行与「绝不重叠」。
 
 约定：世界推进只走 world.update()，不启动后台线程，结果可复现。
+重叠判定用小车/消防车的绘制坐标（含横向让行偏移）。
 """
 import math
 import sys
@@ -10,6 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from sim.world import (  # noqa: E402
     World, NpcCar, BASE_SPEED, CAR_MAX, CAR_PULL_OVER, CAR_COLORS,
+    CAR_CAR_GAP, CAR_MIN_GAP,
 )
 
 N150 = (170.0, 150.0)
@@ -43,12 +45,27 @@ def add_car(world, x, y, heading, waypoints, route_keys=(N150, N265, N380)):
     return car
 
 
-def dispatch_truck(world, x, y):
+def dispatch_truck(world, x, y, heading=math.pi / 2):
     """把消防车摆成「正在出车」的状态（ai_mission 不需要真的规划就能推进）。"""
     world.truck.state = "ai_mission"
     world.truck.x, world.truck.y = x, y
+    world.truck.heading = heading
     world.truck.waypoints = [(x, y)]
     world.truck.wp_index = 0
+
+
+def park_truck(world, x, y, state="idle", heading=math.pi / 2):
+    """把消防车停在某处（补水 / 维修 / 待命都算停着）。"""
+    world.truck.state = state
+    world.truck.x, world.truck.y = x, y
+    world.truck.heading = heading
+    world.truck.speed = 0.0
+    world.truck.waypoints = []
+    world.truck.wp_index = 0
+
+
+def drawn(world, car):
+    return world._car_drawn_xy(car)
 
 
 # ---------------------------------------------------------------- 常驻规则
@@ -89,16 +106,15 @@ def test_小车统一使用消防红的深色():
 # ---------------------------------------------------------------- 路口让行
 def test_在路口遇消防车_小车停车让行():
     w = make_world()
-    # 车头前方 70 单位就是路口 (170, 380)
+    # 车头前方 70 单位就是路口 (170, 380)，消防车正从路口开过来
     car = add_car(w, 154.0, 310.0, math.pi / 2,
                   [(154.0, 380.0), (154.0, 500.0)], route_keys=(N150, N380, N265))
-    dispatch_truck(w, 154.0, 420.0)
+    dispatch_truck(w, 154.0, 390.0)            # 在前方路口，同向出车
     advance(w, 1.0)
 
     assert car.state == "yield_intersection"
     assert car.speed == 0.0
-    # 停在路口外，没有开进交叉口
-    assert car.y < 380 - 36
+    assert car.y < 380.0 - 30                  # 停在路口外，没有挤进交叉口
 
 
 def test_路口让行时消防车优先通过():
@@ -114,17 +130,16 @@ def test_路口让行时消防车优先通过():
 
 
 # ---------------------------------------------------------------- 路侧避让
-def test_非路口遇消防车_小车靠边避让():
+def test_迎面遇消防车_小车靠边停车():
     w = make_world()
-    # 150 到 265 之间，前方最近的路口 (380) 还远，不算「在路口」
     car = add_car(w, 154.0, 215.0, math.pi / 2,
                   [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
-    dispatch_truck(w, 120.0, 300.0)
+    dispatch_truck(w, 120.0, 300.0, heading=-math.pi / 2)   # 迎面开来
     advance(w, 2.5)
 
     assert car.state == "yield_roadside"
     assert car.speed == 0.0
-    assert car.side > 0.5                     # 已经向路缘平移
+    assert car.side > 0.5                     # 已经向路肩平移
     assert car.side <= CAR_PULL_OVER + 0.01
 
 
@@ -132,7 +147,7 @@ def test_消防车通过后小车恢复行驶():
     w = make_world()
     car = add_car(w, 154.0, 215.0, math.pi / 2,
                   [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
-    dispatch_truck(w, 120.0, 300.0)
+    dispatch_truck(w, 120.0, 300.0, heading=-math.pi / 2)
     advance(w, 2.5)
     assert car.state == "yield_roadside"
 
@@ -143,15 +158,65 @@ def test_消防车通过后小车恢复行驶():
     assert car.side < 0.01                    # 回到车道中心
 
 
-def test_停着的消防车不会卡住小车():
+# ---------------------------------------------------------------- 借道绕行
+def test_停着的消防车在前方_小车借道绕行():
     w = make_world()
     car = add_car(w, 154.0, 215.0, math.pi / 2,
                   [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
-    w.truck.state = "idle"
-    w.truck.x, w.truck.y = 120.0, 300.0       # 就近停着，但没有出车
-    advance(w, 1.0)
-    assert car.state == "driving"
-    assert car.speed > 0.0
+    park_truck(w, 154.0, 300.0, state="idle")  # 停在小车正前方的车道上
+    advance(w, 0.4)
+    assert car.state == "bypass"               # 接近时就决定借道
+
+    advance(w, 1.6)
+    assert car.side < -1.0                     # 已经借到对向车道
+    assert math.hypot(*[a - b for a, b in zip(drawn(w, car),
+                                              (w.truck.x, w.truck.y))]) >= CAR_MIN_GAP - 0.5
+
+
+def test_补水与维修时也不和消防车重叠():
+    for state in ("refilling", "repairing"):
+        w = make_world()
+        car = add_car(w, 154.0, 180.0, math.pi / 2,
+                      [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
+        park_truck(w, 170.0, 265.0, state=state)   # 停在小车这条车道上
+        if state == "refilling":
+            w.truck.water = 40.0
+        min_gap = 1e9
+        for _ in range(120):                       # 12 秒
+            w.update(0.1)
+            cx, cy = drawn(w, car)
+            min_gap = min(min_gap, math.hypot(cx - w.truck.x, cy - w.truck.y))
+        assert min_gap >= CAR_MIN_GAP - 0.5, (state, min_gap)
+        assert car.y > 300.0                       # 已经从旁边绕过去
+
+
+def test_小车之间也不重叠():
+    w = World(auto_spawn=True, seed=31)
+    min_gap = 1e9
+    for _ in range(1200):                          # 120 秒
+        w.update(0.1)
+        pos = [drawn(w, c) for c in w.cars]
+        for i in range(len(pos)):
+            for j in range(i + 1, len(pos)):
+                min_gap = min(min_gap, math.hypot(pos[i][0] - pos[j][0],
+                                                  pos[i][1] - pos[j][1]))
+    assert min_gap >= CAR_CAR_GAP - 0.5, min_gap
+
+
+def test_跟车会减速避免追尾():
+    w = make_world()
+    front = add_car(w, 154.0, 265.0, math.pi / 2,
+                    [(154.0, 380.0), (154.0, 500.0)], route_keys=(N150, N380, N265))
+    rear = add_car(w, 154.0, 215.0, math.pi / 2,
+                   [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
+    park_truck(w, 900.0, 700.0, state="idle")      # 消防车挪远，排除干扰
+    front.cruise = 0.0                             # 前车停住不动
+    front.speed = 0.0
+    rear.speed = 55.0
+    advance(w, 2.0)
+    assert rear.speed < 30.0                       # 前车停着，后车明显减速
+    gap = math.hypot(*[a - b for a, b in zip(drawn(w, rear), drawn(w, front))])
+    assert gap >= CAR_CAR_GAP - 0.5
 
 
 # ---------------------------------------------------------------- 状态导出
@@ -161,4 +226,4 @@ def test_状态里带上四辆小车的绘制字段():
     assert len(cars) == CAR_MAX
     for c in cars:
         assert {"id", "x", "y", "heading", "speed", "state", "color"} <= set(c)
-        assert c["state"] == "driving"
+    assert w.get_state()["car_limit"] == CAR_MAX
