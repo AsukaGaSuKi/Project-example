@@ -632,7 +632,7 @@ function drawScene(now){
   // 路口拥堵 / 清理中
   if (s.jam){
     const jx = s.jam.x, jy = s.jam.y;
-    const phase = s.jam.phase === 'peds' ? '行人掉头' : s.jam.phase === 'cars' ? '小车靠边' : '消防车优先通过';
+    const phase = s.jam.phase === 'peds' ? '行人绕行' : s.jam.phase === 'cars' ? '小车靠边' : '消防车优先通过';
     const r = 46 + 5*Math.sin(now/180);
     ctx.save();
     ctx.strokeStyle = 'rgba(248,113,113,.9)'; ctx.lineWidth = 2;

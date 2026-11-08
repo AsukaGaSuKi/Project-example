@@ -1830,9 +1830,9 @@ class World:
             if m["timer"] >= JAM_PED_TIME:
                 m["phase"] = "cars"
                 m["timer"] = 0.0
-                turned = self._turn_pedestrians_around(node)
+                moved = self._evacuate_pedestrians(node)
                 aside = self._pull_cars_aside(node)
-                self._log(f"行人已掉头离开路口（{turned} 人），{aside} 辆小车靠边让行", "info")
+                self._log(f"行人已自行绕开路口（{moved} 人），{aside} 辆小车靠边让行", "info")
         elif m["phase"] == "cars":
             if m["timer"] >= JAM_CAR_TIME:
                 m["phase"] = "truck"
@@ -1887,24 +1887,6 @@ class World:
             ped.state = "leaving"
             return True
         return False
-
-    def _turn_pedestrians_around(self, node: int) -> int:
-        """路口附近的行人原地掉头，沿原路走回去。"""
-        nx, ny = self.city.road.xy[node]
-        count = 0
-        for ped in self.pedestrians:
-            if math.hypot(ped.x - nx, ped.y - ny) >= JAM_PED_R:
-                continue
-            back = list(reversed(ped.path[:ped.idx])) if ped.idx > 0 else []
-            if len(back) >= 2:
-                ped.path = back
-                ped.idx = 1
-                ped.waiting = False
-                ped.state = "leaving"
-                count += 1
-            elif self._ped_flee(ped, nx, ny):
-                count += 1
-        return count
 
     def _pull_cars_aside(self, node: int) -> int:
         """让路口附近的小车靠边停下，把车道让给消防车。"""
