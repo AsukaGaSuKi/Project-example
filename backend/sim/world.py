@@ -38,7 +38,7 @@ AI_SCAN_TIME = 1.4       # AI 巡检点在点停留时间（秒）
 AI_ARRIVE = 42.0         # 判定「到达停靠点」的距离
 
 # ---- 私家车（NPC）：常驻路网，四辆，给消防车让行 ----
-CAR_MAX = 4              # 路网常驻私家车数量（不再随机刷新/消失）
+CAR_MAX = 3              # 路网常驻私家车数量（不再随机刷新/消失）
 CAR_SPEED_MIN = 52.0     # 私家车巡航速度区间（比消防车慢，便于被追上时让行）
 CAR_SPEED_MAX = 68.0
 CAR_ACCEL = 90.0
@@ -63,6 +63,12 @@ JAM_PED_TIME = 1.8       # 疏散行人的时间
 JAM_CAR_TIME = 2.2       # 小车重新找路的时间
 JAM_PED_R = 115.0        # 需要疏散的行人范围
 JAM_TRUCK_DWELL = 2.0    # 消防车到场清理停留时间
+
+# ---- 消防车被堵 / 故障：先让小车撤离，消防车再回去维修 ----
+CLEARWAY_R = 130.0       # 需要撤离的小车范围
+CLEARWAY_TRIGGER = 3.0   # 消防车被堵多久判定为堵住
+CLEARWAY_TIME = 2.5      # 小车撤离的时间
+ESCAPE_TIME = 8.0        # 小车撤离时忽略消防车的时长
 CAR_SIDE_RATE = 26.0     # 横向平移速度
 
 # 车身颜色：与消防车同款的深红，只做细微深浅区分
@@ -158,6 +164,7 @@ class NpcCar:
     retry: float = 0.0              # 到达终点后重选路线的冷却
     stuck: float = 0.0              # 被堵住的计时
     reverse: float = 0.0            # 倒车让行的剩余时间
+    escape: float = 0.0             # 消防车被堵/故障时的撤离计时
 
     @property
     def yielding(self) -> bool:
@@ -188,6 +195,8 @@ class World:
         }
         self.ai_mission: dict | None = None
         self.jam: dict | None = None
+        self.clear_way: dict | None = None
+        self._truck_stuck = 0.0
         self._jam_watch: dict[int, float] = {}
         self._jam_clear_timer = 0.0
         self._next_fire_id = 1
@@ -253,6 +262,7 @@ class World:
         self._update_self_check(dt)
         self._update_truck(dt)
         self._update_cars(dt)
+        self._update_clear_way(dt)
         self._update_jam(dt)
         if self.auto_spawn:
             self._update_spawners(dt)
@@ -1191,6 +1201,8 @@ class World:
 
     def _update_cars(self, dt: float) -> None:
         for car in self.cars:
+            if car.escape > 0:
+                car.escape = max(0.0, car.escape - dt)
             self._car_yield(car)
             self._car_drive(car, dt)
             if car.wp_index >= len(car.waypoints):
@@ -1280,6 +1292,11 @@ class World:
         - 同侧同向、消防车在前面停下（补水 / 维修 / 灭火）：停在它后面排队等；
         - 消防车在另一条路上（横向错开）：各走各的。
         """
+        if car.escape > 0:
+            # 消防车被堵 / 故障：这一段先让小车自己开走，不再等它
+            car.state = "driving"
+            return
+
         if self._junction_busy(car):
             car.state = "yield_intersection"
             return
@@ -1372,6 +1389,8 @@ class World:
         return CAR_PULL_OVER
 
     def _car_target_speed(self, car: NpcCar) -> float:
+        if car.escape > 0:
+            return car.cruise                      # 正在撤离：全速离开
         if car.state == "yield_intersection":
             return 0.0
         if car.state == "yield_roadside":
@@ -1598,6 +1617,49 @@ class World:
             return 0.0
         return max(0.0, lead_speed * (gap - CAR_CAR_LEN) / (safe - CAR_CAR_LEN))
 
+    # ------------------------------------------------------------------ 消防车被堵 / 故障
+    def _update_clear_way(self, dt: float) -> None:
+        """消防车被小车堵住、或在车流里故障：先让小车走，再让消防车回去修。"""
+        t = self.truck
+        if self.clear_way:
+            self.clear_way["timer"] += dt
+            if self.clear_way["timer"] >= CLEARWAY_TIME:
+                if t.fault and t.state not in ("to_repair", "repairing", "self_check"):
+                    self.dispatch_repair()
+                    self._log("小车已驶离，消防车返回维修站处理故障", "warning")
+                self.clear_way = None
+            return
+
+        nearby = any(math.hypot(*[a - b for a, b in zip(self._car_drawn_xy(c),
+                                                        (t.x, t.y))]) < CLEARWAY_R
+                     for c in self.cars)
+
+        if t.fault and nearby and t.state not in ("to_repair", "repairing"):
+            self._start_clear_way("消防车在车流中故障")
+            return
+
+        moving_state = t.state in ("to_fire", "to_refill", "to_repair", "ai_mission", "to_jam")
+        if moving_state and t.speed < 1.0 and nearby:
+            self._truck_stuck += dt
+            if self._truck_stuck >= CLEARWAY_TRIGGER:
+                self._start_clear_way("消防车被小车堵住")
+                return
+        else:
+            self._truck_stuck = 0.0
+
+    def _start_clear_way(self, reason: str) -> None:
+        self.clear_way = {"timer": 0.0, "reason": reason, "started": round(self.time, 1)}
+        node = self.city.nearest_road_node(self.truck.x, self.truck.y)
+        count = 0
+        for car in self.cars:
+            x, y = self._car_drawn_xy(car)
+            if math.hypot(x - self.truck.x, y - self.truck.y) < CLEARWAY_R:
+                car.escape = ESCAPE_TIME
+                car.retry = 0.0
+                if self._car_new_route(car, blocked=(node,)):
+                    count += 1
+        self._log(f"{reason}，先让附近 {count} 辆小车驶离", "warning")
+
     # ------------------------------------------------------------------ 路口拥堵疏通
     def _jam_nodes(self) -> list[int]:
         return [nid for nid in range(len(self.city.road.xy))
@@ -1711,6 +1773,8 @@ class World:
 
     def dispatch_jam_clear(self, node: int) -> bool:
         """消防车前往拥堵路口清理现场。"""
+        if self.clear_way or self.truck.fault:
+            return False                          # 正忙着让车 / 有故障：先去处理更急的
         if self.ai_mission:
             self._end_ai_mission("前往清理拥堵路口")
         planned = self._plan_route(node)

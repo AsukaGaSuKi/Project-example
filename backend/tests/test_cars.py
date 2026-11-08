@@ -105,9 +105,9 @@ def body_overlaps(world):
 
 
 # ---------------------------------------------------------------- 常驻规则
-def test_启动就常驻四辆小车():
+def test_启动就常驻三辆小车():
     w = World(auto_spawn=True, seed=11)
-    assert len(w.cars) == CAR_MAX == 4
+    assert len(w.cars) == CAR_MAX == 3
     assert w.spawn_car()["ok"] is False
 
 
@@ -392,8 +392,52 @@ def test_消防车前往清理并结束任务():
     assert w.stats["jam_clears"] >= 1
 
 
+# ---------------------------------------------------------------- 消防车被堵 / 故障
+def test_消防车被堵_先让小车撤离():
+    w = make_world()
+    w.cars = []
+    n150 = w.city.road_nodes[(170.0, 150.0)]
+    n380 = w.city.road_nodes[(170.0, 380.0)]
+    for cid, (x, y) in enumerate(((154.0, 330.0), (186.0, 336.0)), start=1):
+        w.cars.append(NpcCar(id=cid, x=x, y=y, heading=math.pi / 2, cruise=0.0,
+                             color="#c8102e", route=[n150, n380],
+                             waypoints=[(154.0, 500.0)], target_node=n380))
+    w._next_car_id = 3
+    w.truck.state = "ai_mission"
+    w.truck.x, w.truck.y = 170.0, 300.0
+    w.truck.heading = math.pi / 2
+    w.truck.waypoints = [(170.0, 500.0)]
+    w.truck.wp_index = 0
+
+    advance(w, 4.0)
+    assert w.clear_way is not None
+    assert "堵" in w.clear_way["reason"]
+    assert all(c.escape > 0 for c in w.cars)     # 小车进入撤离状态
+
+
+def test_消防车在车流中故障_先让小车走再回维修站():
+    w = make_world()
+    w.cars = []
+    n150 = w.city.road_nodes[(170.0, 150.0)]
+    n380 = w.city.road_nodes[(170.0, 380.0)]
+    w.cars.append(NpcCar(id=1, x=170.0, y=330.0, heading=math.pi / 2, cruise=0.0,
+                         color="#c8102e", route=[n150, n380],
+                         waypoints=[(154.0, 500.0)], target_node=n380))
+    w._next_car_id = 2
+    w.truck.x, w.truck.y = 170.0, 300.0
+    w.inject_fault("pump")
+
+    advance(w, 1.0)
+    assert w.clear_way is not None
+    assert w.cars[0].escape > 0
+    advance(w, 4.0)
+    assert w.clear_way is None
+    assert w.truck.state in ("to_repair", "repairing", "self_check")
+    assert w.truck.fault == "pump"
+
+
 # ---------------------------------------------------------------- 状态导出
-def test_状态里带上四辆小车的绘制字段():
+def test_状态里带上三辆小车的绘制字段():
     w = World(auto_spawn=True, seed=14)
     cars = w.get_state()["cars"]
     assert len(cars) == CAR_MAX
