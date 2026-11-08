@@ -287,6 +287,45 @@ def test_跟车会减速避免追尾():
     assert math.hypot(fx - rx, fy - ry) >= min(CAR_CAR_LEN, CAR_CAR_SIDE)
 
 
+# ---------------------------------------------------------------- 行人与会车
+def test_小车会为前方行人停车():
+    w = make_world()
+    car = add_car(w, 154.0, 300.0, math.pi / 2, [(154.0, 380.0), (154.0, 500.0)])
+    ped = w.pedestrians[0]
+    ped.x, ped.y = 154.0, 352.0                # 车头前方 52 单位
+    ped.speed = 0.0                            # 站着不动，方便验证
+    w.pedestrians = [ped]
+    advance(w, 2.0)
+    assert car.speed < 6.0                      # 减速 / 停住，让人先过
+
+    ped.x, ped.y = 900.0, 700.0                 # 行人走开
+    advance(w, 2.0)
+    assert car.speed > 10.0
+
+
+def test_小车不会撞到行人():
+    w = World(auto_spawn=True, seed=71)
+    closest = 1e9
+    for _ in range(900):                        # 90 秒
+        w.update(0.1)
+        for car in w.cars:
+            cx, cy = drawn(w, car)
+            for ped in w.pedestrians:
+                closest = min(closest, math.hypot(ped.x - cx, ped.y - cy))
+    assert closest >= 22.0, closest
+
+
+def test_对向会车不会迎面相撞():
+    w = make_world()
+    a = add_car(w, 154.0, 320.0, math.pi / 2, [(154.0, 380.0)], route_keys=(N150, N380))
+    b = add_car(w, 154.0, 250.0, -math.pi / 2, [(154.0, 150.0)], route_keys=(N380, N150))
+    park_truck(w, 900.0, 700.0, state="idle")
+    for _ in range(30):                          # 3 秒
+        w.update(0.1)
+        assert not body_overlaps(w)
+    assert math.hypot(*(p - q for p, q in zip(drawn(w, a), drawn(w, b)))) >= 24.0
+
+
 # ---------------------------------------------------------------- 状态导出
 def test_状态里带上四辆小车的绘制字段():
     w = World(auto_spawn=True, seed=14)

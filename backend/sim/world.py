@@ -1094,8 +1094,25 @@ class World:
                     self._maybe_wait(ped)
                 continue
             step = min(dist, ped.speed * dt)
-            ped.x += dx / dist * step
-            ped.y += dy / dist * step
+            nx = ped.x + dx / dist * step
+            ny = ped.y + dy / dist * step
+            if self._ped_blocked(ped, nx, ny):
+                ped.state = "waiting_car"          # 车还没过去，先站住
+                continue
+            ped.x, ped.y = nx, ny
+
+    def _ped_blocked(self, ped: Pedestrian, nx: float, ny: float) -> bool:
+        """行人这一步会不会撞到车：会就站着等，等车过去再走。"""
+        if math.hypot(self.truck.x - nx, self.truck.y - ny) < 34:
+            if math.hypot(self.truck.x - nx, self.truck.y - ny) < math.hypot(
+                    self.truck.x - ped.x, self.truck.y - ped.y):
+                return True
+        for car in self.cars:
+            cx, cy = self._car_drawn_xy(car)
+            d = math.hypot(cx - nx, cy - ny)
+            if d < 26 and d < math.hypot(cx - ped.x, cy - ped.y):
+                return True
+        return False
 
     # ------------------------------------------------------------------ 私家车（NPC）
     def spawn_car(self) -> dict:
@@ -1341,9 +1358,59 @@ class World:
             return min(car.cruise, max(self.truck.speed, 0.0))
         return car.cruise
 
+    def _oncoming_speed(self, car: NpcCar) -> float:
+        """会车：对向车辆窜到自己车道上时减速 / 停车，避免迎面相撞。"""
+        cap = car.cruise
+        cx, cy = self._car_drawn_xy(car)
+        for other in self.cars:
+            if other.id == car.id:
+                continue
+            if abs(self._angle_diff(other.heading, car.heading)) < 1.6:
+                continue                            # 同向不算会车
+            ox, oy = self._car_drawn_xy(other)
+            dx, dy = ox - cx, oy - cy
+            dist = math.hypot(dx, dy)
+            if dist > 90 or dist < 1e-3:
+                continue
+            rel = (math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi
+            if abs(rel) > 0.6:
+                continue
+            gap = dist * math.cos(rel)
+            if gap <= 0 or abs(dist * math.sin(rel)) > 30:
+                continue                            # 各在各的车道，互不影响
+            if gap < 30:
+                cap = 0.0
+            elif gap < 55:
+                cap = min(cap, 24.0)
+        return cap
+
+    def _pedestrian_speed(self, car: NpcCar) -> float:
+        """前方有行人（过街 / 走上车道）：减速，近了就停，等人过去再走。"""
+        cap = car.cruise
+        cx, cy = self._car_drawn_xy(car)
+        for ped in self.pedestrians:
+            dx, dy = ped.x - cx, ped.y - cy
+            dist = math.hypot(dx, dy)
+            if dist > 80 or dist < 1e-3:
+                continue
+            rel = (math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi
+            if abs(rel) > 1.0:
+                continue                            # 正前方 ±57°
+            if abs(dist * math.sin(rel)) > 24:
+                continue                            # 不在本车道上（比如在人行道走）
+            gap = dist * math.cos(rel)
+            if gap <= 0:
+                continue
+            if gap < 52:
+                cap = 0.0
+            elif gap < 80:
+                cap = min(cap, 20.0)
+        return cap
+
     def _car_drive(self, car: NpcCar, dt: float) -> None:
         wants = self._car_target_speed(car) > 1.0
-        target_speed = min(self._car_target_speed(car), self._car_follow_speed(car))
+        target_speed = min(self._car_target_speed(car), self._car_follow_speed(car),
+                           self._oncoming_speed(car), self._pedestrian_speed(car))
         old_heading = car.heading
         if car.wp_index < len(car.waypoints):
             tx, ty = car.waypoints[car.wp_index]
@@ -1422,6 +1489,10 @@ class World:
             ox, oy = self._car_drawn_xy(other)
             if self._cars_crowd(car, px, py, ox, oy) and self._closer(px, py, cx, cy, ox, oy):
                 return False
+        for ped in self.pedestrians:
+            if math.hypot(ped.x - px, ped.y - py) < 24 and \
+                    math.hypot(ped.x - px, ped.y - py) < math.hypot(ped.x - cx, ped.y - cy):
+                return False                       # 别把车横移到行人身上
         return True
 
     def _would_crowd(self, car: NpcCar, nx: float, ny: float) -> bool:
