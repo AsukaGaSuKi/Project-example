@@ -562,21 +562,39 @@ class World:
 
     # ------------------------------------------------------------------ 寻路 / 调度
     def _lane_waypoints(self, route: list[int]) -> list[tuple[float, float]]:
-        """把道路节点序列转成“靠右车道”的连续航点。"""
+        """把道路节点序列转成「靠右车道」的连续航点。
+
+        转弯处会插入两个航点（进弯的车道点 + 出弯的车道点），
+        让车先走到路口右侧再拐，不会斜着从路口中间抄近道。
+        """
         pts = [self.city.road.xy[n] for n in route]
         waypoints: list[tuple[float, float]] = []
+        lanes: list[tuple[float, float]] = []
         for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
             dx, dy = x2 - x1, y2 - y1
             length = math.hypot(dx, dy)
             if length < 0.5:
                 continue
             rx, ry = -dy / length, dx / length       # 行驶方向的右侧法向量
+            lanes.append((rx * LANE, ry * LANE))
+            start_pt = (x1 + rx * LANE, y1 + ry * LANE)
+            if not waypoints:
+                waypoints.append(start_pt)           # 起点也放回车道
+            elif math.hypot(waypoints[-1][0] - start_pt[0],
+                            waypoints[-1][1] - start_pt[1]) > 2.0:
+                waypoints.append(start_pt)           # 转弯：先到路口右侧
             waypoints.append((x2 + rx * LANE, y2 + ry * LANE))
         return waypoints
 
     def _plan_route(self, goal_node: int) -> tuple[list[int], float] | None:
-        start_node = self.city.nearest_road_node(self.truck.x, self.truck.y)
+        # 起点取「车头前方」的节点：避免掉头横穿马路，保持靠右行驶
+        ahead = (self.truck.x + math.cos(self.truck.heading) * 45.0,
+                 self.truck.y + math.sin(self.truck.heading) * 45.0)
+        start_node = self.city.nearest_road_node(*ahead)
         route = graph_astar(self.city.road.adj, start_node, goal_node, self.city.road.xy)
+        if not route:
+            start_node = self.city.nearest_road_node(self.truck.x, self.truck.y)
+            route = graph_astar(self.city.road.adj, start_node, goal_node, self.city.road.xy)
         if not route:
             return None
         length = 0.0
@@ -589,6 +607,9 @@ class World:
         t = self.truck
         t.route = list(route)
         t.waypoints = self._lane_waypoints(route)
+        entry = self._lane_entry(route)
+        if entry is not None:
+            t.waypoints.insert(0, entry)      # 先并回右侧车道，再沿车道走
         t.wp_index = 0
         t.target_station = None
         t.target_fire = None
@@ -597,6 +618,28 @@ class World:
             tx, ty = self.city.road.xy[node]
             t.waypoints = [(tx, ty)]
 
+    def _lane_entry(self, route: list[int]) -> tuple[float, float] | None:
+        """把消防车并回右侧车道：返回第一段车道线上离车最近的点。"""
+        if len(route) < 2:
+            return None
+        (x1, y1), (x2, y2) = self.city.road.xy[route[0]], self.city.road.xy[route[1]]
+        dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 0.5:
+            return None
+        rx, ry = -dy / length, dx / length
+        lx1, ly1 = x1 + rx * LANE, y1 + ry * LANE
+        lx2, ly2 = x2 + rx * LANE, y2 + ry * LANE
+        vx, vy = lx2 - lx1, ly2 - ly1
+        den = vx * vx + vy * vy
+        if den < 1e-6:
+            return None
+        k = ((self.truck.x - lx1) * vx + (self.truck.y - ly1) * vy) / den
+        k = max(0.0, min(1.0, k))
+        px, py = lx1 + vx * k, ly1 + vy * k
+        if math.hypot(px - self.truck.x, py - self.truck.y) < 6.0:
+            return None
+        return (px, py)
     def dispatch_fire(self, fire: Fire) -> bool:
         t = self.truck
         planned = self._plan_route(fire.anchor_node)
