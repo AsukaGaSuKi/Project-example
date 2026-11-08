@@ -76,7 +76,7 @@ class CityMap:
     STATIONS = [
         {"kind": "refill", "name": "西区补水站", "x": 224, "y": 265, "anchor": (170, 265)},
         {"kind": "refill", "name": "东区补水站", "x": 864, "y": 495, "anchor": (830, 495)},
-        {"kind": "repair", "name": "中心维修站", "x": 545, "y": 128, "anchor": (500, 150)},
+        {"kind": "repair", "name": "中心维修站", "x": 545, "y": 128, "anchor": (500, 215)},
     ]
 
     def __init__(self):
