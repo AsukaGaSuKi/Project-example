@@ -1654,16 +1654,47 @@ class World:
 
     def _start_clear_way(self, reason: str) -> None:
         self.clear_way = {"timer": 0.0, "reason": reason, "started": round(self.time, 1)}
-        node = self.city.nearest_road_node(self.truck.x, self.truck.y)
         count = 0
         for car in self.cars:
             x, y = self._car_drawn_xy(car)
             if math.hypot(x - self.truck.x, y - self.truck.y) < CLEARWAY_R:
                 car.escape = ESCAPE_TIME
                 car.retry = 0.0
-                if self._car_new_route(car, blocked=(node,)):
+                if self._car_flee_from_truck(car):
                     count += 1
-        self._log(f"{reason}，先让附近 {count} 辆小车驶离", "warning")
+        self._log(f"{reason}，{count} 辆小车朝反方向驶离", "warning")
+
+    def _car_flee_from_truck(self, car: NpcCar) -> bool:
+        """小车和消防车堵在一起时：朝消防车的反方向开走。"""
+        dx, dy = car.x - self.truck.x, car.y - self.truck.y
+        d = math.hypot(dx, dy)
+        if d < 1e-3:
+            return self._car_new_route(car, uturn=True)
+        away_x, away_y = dx / d, dy / d            # 背离消防车的单位向量
+        nodes = self.city.road.xy
+        start = self.city.nearest_road_node(car.x, car.y)
+        candidates = []
+        for nid, (nx, ny) in enumerate(nodes):
+            if nid == start:
+                continue
+            vx, vy = nx - car.x, ny - car.y
+            dist = math.hypot(vx, vy)
+            if dist < 60:
+                continue
+            if (vx * away_x + vy * away_y) / dist < 0.2:
+                continue                            # 只走「远离消防车」那一侧
+            candidates.append((dist, nid))
+        candidates.sort()
+        for _dist, goal in candidates[:6]:
+            route = graph_astar(self.city.road.adj, start, goal, nodes)
+            if not route or len(route) < 2:
+                continue
+            waypoints = self._lane_waypoints(route)
+            if not waypoints:
+                continue
+            self._apply_car_route(car, route, waypoints, goal)
+            return True
+        return self._car_new_route(car, uturn=True)  # 兜底：掉头找条路
 
     # ------------------------------------------------------------------ 路口拥堵疏通
     def _jam_nodes(self) -> list[int]:

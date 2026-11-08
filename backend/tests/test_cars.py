@@ -456,6 +456,29 @@ def test_堵住时允许小车掉头换路():
     assert car.waypoints
 
 
+def test_消防车与小车堵住_小车朝反方向驶离():
+    w = make_world()
+    w.cars = []
+    n150 = w.city.road_nodes[(170.0, 150.0)]
+    n380 = w.city.road_nodes[(170.0, 380.0)]
+    car = NpcCar(id=1, x=170.0, y=340.0, heading=math.pi / 2, cruise=50.0,
+                 color="#c8102e", route=[n150, n380],
+                 waypoints=[(154.0, 500.0)], target_node=n380)
+    w.cars.append(car)
+    w._next_car_id = 2
+    w.truck.x, w.truck.y = 170.0, 300.0        # 小车在消防车正南
+    w.truck.heading = math.pi / 2
+
+    w._start_clear_way("消防车被小车堵住")
+    assert car.escape > 0
+    assert car.waypoints
+    tx, ty = car.waypoints[0]
+    dx, dy = tx - car.x, ty - car.y
+    ax, ay = car.x - w.truck.x, car.y - w.truck.y     # 背离消防车的方向
+    cos = (dx * ax + dy * ay) / (math.hypot(dx, dy) * math.hypot(ax, ay))
+    assert cos > 0.2                                    # 目标点确实在反方向
+
+
 # ---------------------------------------------------------------- 状态导出
 def test_状态里带上两辆小车的绘制字段():
     w = World(auto_spawn=True, seed=14)
