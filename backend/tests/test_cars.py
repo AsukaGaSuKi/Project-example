@@ -380,16 +380,13 @@ def test_疏通时小车靠边让行():
     assert any(c.pull_aside > 0 or c.side > 0.5 for c in near)   # 靠边了
 
 
-def test_消防车前往清理并结束任务():
-    w, node = _jam_scene(truck_xy=(380.0, 380.0))   # 消防车就在附近
-    saw_to_jam = saw_clearing = False
-    for _ in range(300):                             # 30 秒
+def test_拥堵时不强制消防车前往():
+    w, node = _jam_scene(truck_xy=(380.0, 380.0))
+    for _ in range(150):                            # 15 秒
         w.update(0.1)
-        if w.truck.state == "to_jam":
-            saw_to_jam = True
-        if w.truck.state == "clearing_jam":
-            saw_clearing = True
-    assert saw_to_jam and saw_clearing               # 去了、也到场清理了
+        assert w.truck.state not in ("to_jam", "clearing_jam")
+    assert w.stats["jam_clears"] >= 1               # 拥堵处理确实跑过
+    assert w.truck.state in ("idle", "self_check", "to_fire", "extinguishing")
     assert w.stats["jam_clears"] >= 1
 
 

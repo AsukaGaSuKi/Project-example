@@ -298,7 +298,7 @@ class World:
         if t.state == "self_check":
             t.speed = 0.0
             return
-        if t.state in ("to_fire", "to_refill", "to_repair", "ai_mission", "to_jam"):
+        if t.state in ("to_fire", "to_refill", "to_repair", "ai_mission"):
             if t.state == "to_fire" and not self._fire_by_id(t.target_fire):
                 self._enter_idle("目标火情已消失")
                 return
@@ -315,8 +315,6 @@ class World:
         t.speed = 0.0
         if t.state == "extinguishing":
             self._extinguish(dt)
-        elif t.state == "clearing_jam":
-            self._clear_jam(dt)
         elif t.state == "refilling":
             self._refill(dt)
         elif t.state == "repairing":
@@ -426,13 +424,6 @@ class World:
                     t.speed = 0.0
                     self._repair_timer = 0.0
                     self._log(f"抵达{st['name']}，开始检修", "warning")
-        elif t.state == "to_jam" and self.jam:
-            ax, ay = self.city.road.xy[self.jam["node"]]
-            if self._dist(t.x, t.y, ax, ay) <= 75:
-                t.state = "clearing_jam"
-                t.speed = 0.0
-                self._jam_clear_timer = 0.0
-                self._log("消防车抵达拥堵路口，开始清理现场", "warning")
 
     def _enter_idle(self, reason: str = "") -> None:
         t = self.truck
@@ -1236,8 +1227,7 @@ class World:
 
     def _truck_busy(self) -> bool:
         """消防车是否正在出车途中；只有出车时私家车才需要让行。"""
-        return self.truck.state in ("to_fire", "to_refill", "to_repair", "ai_mission",
-                                    "to_jam", "clearing_jam")
+        return self.truck.state in ("to_fire", "to_refill", "to_repair", "ai_mission")
 
     def _update_cars(self, dt: float) -> None:
         for car in self.cars:
@@ -1729,7 +1719,7 @@ class World:
             self._start_clear_way("消防车在车流中故障")
             return
 
-        moving_state = t.state in ("to_fire", "to_refill", "to_repair", "ai_mission", "to_jam")
+        moving_state = t.state in ("to_fire", "to_refill", "to_repair", "ai_mission")
         if moving_state and t.speed < 1.0 and nearby:
             self._truck_stuck += dt
             if self._truck_stuck >= CLEARWAY_TRIGGER:
@@ -1833,20 +1823,9 @@ class World:
                 self._log(f"行人已自行绕开路口（{moved} 人），{aside} 辆小车靠边让行", "info")
         elif m["phase"] == "cars":
             if m["timer"] >= JAM_CAR_TIME:
-                m["phase"] = "truck"
-                m["timer"] = 0.0
-                if self.dispatch_jam_clear(node):
-                    self._log("消防车优先通过拥堵路口", "warning")
-                else:
-                    self._end_jam("路口已自行疏通")
-        elif m["phase"] == "truck":
-            # 消防车在路上：把挡在它前面的行人继续支开，避免「车等人、人等车」
-            nx, ny = self.city.road.xy[node]
-            for ped in self.pedestrians:
-                if math.hypot(ped.x - self.truck.x, ped.y - self.truck.y) < 170:
-                    self._ped_flee(ped, nx, ny)
-            if self.truck.state not in ("to_jam", "clearing_jam"):
-                self._end_jam("路口清理完成，交通恢复")
+                # 不强制消防车过来：只把路让开，消防车需要经过时优先
+                self._log("路口已让开，消防车需要经过时优先通过", "success")
+                self._end_jam("路口拥堵处理完成，交通恢复")
 
     def _end_jam(self, reason: str) -> None:
         if self.jam:
@@ -1912,36 +1891,6 @@ class World:
             if self._car_new_route(car, blocked=(node,), uturn=True):
                 count += 1
         return count
-
-    def dispatch_jam_clear(self, node: int) -> bool:
-        """消防车前往拥堵路口清理现场。"""
-        if self.clear_way or self.truck.fault:
-            return False                          # 正忙着让车 / 有故障：先去处理更急的
-        if self.ai_mission:
-            self._end_ai_mission("前往清理拥堵路口")
-        planned = self._plan_route(node)
-        if planned is None:
-            return False
-        t = self.truck
-        t.state = "to_jam"
-        t.spray = False
-        t.target_fire = None
-        t.target_station = None
-        self._set_route(planned[0], node)
-        return True
-
-    def _clear_jam(self, dt: float) -> None:
-        """消防车到场后清理：挪走路口里的路障，停一会儿再把交通交回来。"""
-        self._jam_clear_timer += dt
-        if self.jam:
-            nx, ny = self.city.road.xy[self.jam["node"]]
-            for obstacle in list(self.obstacles):
-                if math.hypot(obstacle.x - nx, obstacle.y - ny) < 120:
-                    self.obstacles = [o for o in self.obstacles if o.id != obstacle.id]
-                    self.stats["obstacles_cleared"] += 1
-        if self._jam_clear_timer >= JAM_TRUCK_DWELL:
-            self._enter_idle()
-            self._end_jam("路口清理完成，交通恢复")
 
     # ------------------------------------------------------------------ 查询
     def _fire_by_id(self, fire_id: int | None) -> Fire | None:
