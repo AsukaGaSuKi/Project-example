@@ -564,25 +564,17 @@ class World:
     def _lane_waypoints(self, route: list[int]) -> list[tuple[float, float]]:
         """把道路节点序列转成「靠右车道」的连续航点。
 
-        转弯处会插入两个航点（进弯的车道点 + 出弯的车道点），
-        让车先走到路口右侧再拐，不会斜着从路口中间抄近道。
+        每个路口只保留「这一段的车道终点」，车到路口后直接朝下一段的车道拐弯，
+        不额外绕到路口角上，所以不会出现兜圈子的动作。
         """
         pts = [self.city.road.xy[n] for n in route]
         waypoints: list[tuple[float, float]] = []
-        lanes: list[tuple[float, float]] = []
         for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
             dx, dy = x2 - x1, y2 - y1
             length = math.hypot(dx, dy)
             if length < 0.5:
                 continue
             rx, ry = -dy / length, dx / length       # 行驶方向的右侧法向量
-            lanes.append((rx * LANE, ry * LANE))
-            start_pt = (x1 + rx * LANE, y1 + ry * LANE)
-            if not waypoints:
-                waypoints.append(start_pt)           # 起点也放回车道
-            elif math.hypot(waypoints[-1][0] - start_pt[0],
-                            waypoints[-1][1] - start_pt[1]) > 2.0:
-                waypoints.append(start_pt)           # 转弯：先到路口右侧
             waypoints.append((x2 + rx * LANE, y2 + ry * LANE))
         return waypoints
 
@@ -1574,7 +1566,10 @@ class World:
             by = car.y - math.sin(car.heading) * back_speed * dt
             bx = max(10.0, min(self.city.WIDTH - 10.0, bx))
             by = max(10.0, min(self.city.HEIGHT - 10.0, by))
-            if not self._would_crowd(car, bx, by) and not self._truck_crowds(bx, by):
+            rpx = bx - math.sin(car.heading) * car.side
+            rpy = by + math.cos(car.heading) * car.side
+            if (not self._would_crowd(car, bx, by) and not self._truck_crowds(bx, by)
+                    and not self._in_building(rpx, rpy)):
                 car.x, car.y = bx, by
                 car.reverse = 0.0                  # 倒一步就停，避免倒退撞到后车
 
