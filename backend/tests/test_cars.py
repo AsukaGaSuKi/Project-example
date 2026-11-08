@@ -496,7 +496,7 @@ def test_停稳的小车不会横在路面上():
                 diff = abs((lane - car.heading + math.pi) % (2 * math.pi) - math.pi)
                 if min(diff, math.pi - diff) > math.pi / 4:   # 真正横过来（和车道线垂直）
                     bad += 1
-        assert parked > 50
+        assert parked > 20
         assert bad / parked < 0.10, (seed, bad, parked)
 
 

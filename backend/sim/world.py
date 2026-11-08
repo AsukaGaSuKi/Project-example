@@ -100,6 +100,7 @@ class Truck:
     speed: float = 0.0
     water: float = 100.0
     battery: float = 100.0
+    u_turn: bool = False     # 正在原地掉头
     state: str = "idle"
     route: list[int] = field(default_factory=list)
     waypoints: list[tuple[float, float]] = field(default_factory=list)
@@ -341,6 +342,16 @@ class World:
             elif dist > 0:
                 desired = math.atan2(dy, dx)
                 diff = (desired - t.heading + math.pi) % (2 * math.pi) - math.pi
+                if abs(diff) > 2.0 or (t.u_turn and abs(diff) > 0.25):
+                    # 目标在车后：原地转过头再走，不绕大圈、也不倒车
+                    t.u_turn = True
+                    t.speed = max(0.0, t.speed - ACCEL * 2.5 * dt)
+                    if t.speed < 2.0:
+                        t.heading += max(-TURN_RATE * 1.5 * dt,
+                                         min(TURN_RATE * 1.5 * dt, diff))
+                        t.heading = (t.heading + math.pi) % (2 * math.pi) - math.pi
+                    return
+                t.u_turn = False
                 if abs(diff) > 0.95:
                     target_speed = min(target_speed, 30.0)
                 if t.speed > 3:
