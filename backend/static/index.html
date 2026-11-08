@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>自动消防小车 · 城市仿真控制台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚒</text></svg>">
 <style>
   :root{
     --bg:#0a1220; --panel:#111c2e; --panel2:#0e1727; --line:#1e2f4a;
@@ -57,6 +58,8 @@
   .actions button:hover{filter:brightness(1.12)}
   .b-fire{background:#dc2626}.b-fault{background:#d97706}.b-check{background:#0284c7}
   .b-block{background:#7c3aed}.b-reset{background:#334155}
+  .b-ai{background:linear-gradient(135deg,#db2777,#7c3aed)}
+  .b-go{background:#0f766e}
   .alerts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:150px;overflow:auto}
   .alerts li{font-size:12px;line-height:1.45;padding:6px 8px;border-radius:8px;background:var(--panel2);border-left:3px solid #334155;color:#b9c9de}
   .alerts li.critical{border-color:var(--red);color:#fca5a5}
@@ -70,9 +73,96 @@
   .legend{font-size:11.5px;color:var(--muted);line-height:1.8}
   .legend b{color:#cbd8ea;font-weight:600}
   .legend .emoji{font-family:"Segoe UI Emoji","Apple Color Emoji",sans-serif}
+
+  /* ===================== AI 最优路线卡片 ===================== */
+  .ai-card{border-color:rgba(219,39,119,.32);background:linear-gradient(180deg,rgba(219,39,119,.08),var(--panel) 55%)}
+  .ai-metrics{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:9px}
+  .ai-metrics .m{background:var(--panel2);border-radius:9px;padding:7px 9px}
+  .ai-metrics .m b{display:block;font-size:15px;color:#f9a8d4;font-family:Consolas,monospace}
+  .ai-metrics .m span{font-size:10.5px;color:var(--muted)}
+  .ai-stops{list-style:none;margin:0 0 9px;padding:0;display:flex;flex-direction:column;gap:4px;max-height:168px;overflow:auto}
+  .ai-stops li{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#c3d2e6;background:var(--panel2);border-radius:8px;padding:4px 8px}
+  .ai-stops li .num{width:17px;height:17px;border-radius:50%;background:#3b1d3d;color:#f9a8d4;font-size:10px;display:grid;place-items:center;flex:none;font-family:Consolas,monospace}
+  .ai-stops li.done{opacity:.55}
+  .ai-stops li.done .num{background:#14532d;color:#86efac}
+  .ai-stops li.now{outline:1px solid rgba(244,114,182,.6);background:rgba(219,39,119,.12)}
+  .ai-stops li .dist{margin-left:auto;color:#8fa3bf;font-family:Consolas,monospace;font-size:10.5px}
+  .ai-empty{font-size:11.5px;color:var(--muted);line-height:1.65;padding:2px 0 9px}
+  .ai-note{font-size:10.5px;color:#6d82a1;line-height:1.6;margin-top:7px}
+
+  /* ===================== AI 小助手 ===================== */
+  .assistant{position:absolute;right:4px;bottom:0;z-index:4;display:flex;align-items:flex-end;gap:4px;pointer-events:none}
+  .bubble{
+    position:relative;pointer-events:auto;max-width:252px;margin-bottom:38px;padding:10px 12px 9px;
+    background:linear-gradient(160deg,rgba(50,23,50,.97),rgba(13,22,38,.985));
+    backdrop-filter:blur(6px);
+    border:1px solid rgba(244,114,182,.45);border-radius:14px 14px 4px 14px;
+    box-shadow:0 14px 34px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.03) inset;
+    font-size:11.5px;line-height:1.6;color:#f7e9ff;transform-origin:100% 100%;
+    animation:pop .32s cubic-bezier(.2,1.3,.4,1);
+  }
+  .bubble::after{
+    content:'';position:absolute;right:8px;bottom:-7px;width:12px;height:12px;
+    background:rgba(28,17,36,.96);border-right:1px solid rgba(244,114,182,.45);border-bottom:1px solid rgba(244,114,182,.45);
+    transform:rotate(45deg);
+  }
+  .bubble h4{margin:0 0 5px;font-size:10.5px;font-weight:600;letter-spacing:.6px;color:#f9a8d4;display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .bubble h4 .status{font-weight:400;color:#a78bfa;font-size:9.5px}
+  .bubble .txt{min-height:32px;white-space:pre-wrap}
+  .bubble .txt .caret{display:inline-block;width:6px;color:#f9a8d4;animation:blink .9s steps(1) infinite}
+  .bubble .mini-actions{display:flex;gap:6px;margin-top:8px}
+  .bubble .mini-actions button{
+    flex:1;border:0;border-radius:7px;padding:5px 4px;font-size:10.5px;color:#fff;cursor:pointer;
+    font-family:inherit;background:rgba(255,255,255,.1);transition:filter .15s,transform .08s;
+  }
+  .bubble .mini-actions button:hover{filter:brightness(1.35)}
+  .bubble .mini-actions button:active{transform:scale(.96)}
+  .bubble .mini-actions .p{background:linear-gradient(135deg,#db2777,#a855f7)}
+  .bubble .mini-actions .g{background:#0f766e}
+  .assistant .sprite-col{position:relative;pointer-events:auto;cursor:pointer;padding:0 2px}
+  .assistant .glow{
+    position:absolute;left:50%;bottom:4px;width:140px;height:120px;transform:translateX(-50%);
+    background:radial-gradient(circle at 50% 60%,rgba(244,114,182,.4),rgba(168,85,247,.14) 55%,transparent 72%);
+    filter:blur(4px);animation:breathe 3.6s ease-in-out infinite;pointer-events:none;
+  }
+  .assistant img.sprite{
+    display:block;width:138px;height:auto;animation:float 4.8s ease-in-out infinite;
+    filter:drop-shadow(0 12px 18px rgba(0,0,0,.5));user-select:none;-webkit-user-drag:none;
+  }
+  .assistant .tag{
+    display:none;position:absolute;left:50%;bottom:-2px;transform:translateX(-50%);white-space:nowrap;
+    font-size:9.5px;letter-spacing:.4px;color:#fbcfe8;background:rgba(24,12,28,.8);
+    border:1px solid rgba(244,114,182,.35);border-radius:20px;padding:1px 10px;
+  }
+  .assistant.thinking img.sprite{animation:float 1.05s ease-in-out infinite}
+  .assistant.thinking .glow{animation:breathe 1.1s ease-in-out infinite}
+  .assistant.poked img.sprite{animation:hop .55s ease}
+  .assistant .spark{position:absolute;font-size:11px;opacity:0;pointer-events:none}
+  .assistant.thinking .spark{animation:sparkle 1.6s ease-in-out infinite}
+  .assistant .spark.s1{left:6px;top:24px;animation-delay:0s}
+  .assistant .spark.s2{right:2px;top:60px;animation-delay:.5s}
+  .assistant .spark.s3{left:52px;top:0;animation-delay:1s}
+  .assistant.min .bubble{display:none}
+  .assistant .toggle{
+    position:absolute;right:2px;bottom:2px;width:22px;height:22px;border-radius:50%;border:1px solid rgba(255,255,255,.18);
+    background:rgba(15,23,42,.82);color:#cbd5e1;font-size:11px;cursor:pointer;display:grid;place-items:center;pointer-events:auto;
+  }
+  @keyframes float{0%,100%{transform:translateY(0) rotate(-1.6deg)}50%{transform:translateY(-8px) rotate(1.8deg)}}
+  @keyframes hop{0%,100%{transform:translateY(0) scale(1)}30%{transform:translateY(-16px) scale(1.05)}55%{transform:translateY(0) scale(.96)}75%{transform:translateY(-5px) scale(1.01)}}
+  @keyframes breathe{0%,100%{opacity:.55;transform:translateX(-50%) scale(.9)}50%{opacity:1;transform:translateX(-50%) scale(1.12)}}
+  @keyframes pop{from{opacity:0;transform:translateY(10px) scale(.94)}to{opacity:1;transform:none}}
+  @keyframes sparkle{0%,100%{opacity:0;transform:scale(.4)}45%{opacity:1;transform:scale(1.15) rotate(20deg)}}
+  @keyframes blink{50%{opacity:0}}
+
   @media (max-width:1080px){
     .layout{grid-template-columns:1fr}
     .hud{grid-template-columns:1fr 1fr 1fr}
+    .assistant img.sprite{width:112px}
+    .bubble{max-width:200px;font-size:11px}
+  }
+  @media (max-width:720px){
+    .assistant img.sprite{width:96px}
+    .bubble{display:none}
   }
 </style>
 </head>
@@ -83,7 +173,27 @@
       <h1>🚒 自动消防小车 · 城市仿真<span>连续路网 / 行人交通规则 / 机械臂清障 / 全车自检</span></h1>
       <div class="clock">仿真 <b id="clock">0.0s</b> ｜ 信号灯 <b id="signal">--</b></div>
     </div>
-    <div class="canvas-wrap"><canvas id="cv" width="1000" height="740"></canvas></div>
+    <div class="canvas-wrap">
+      <canvas id="cv" width="1000" height="740"></canvas>
+
+      <!-- AI 领航员：立绘 + 对话气泡 -->
+      <div class="assistant" id="assistant">
+        <div class="bubble" id="aiBubble">
+          <h4>MOMO · AI 领航员 <span class="status" id="aiBubbleStatus">待命</span></h4>
+          <div class="txt" id="aiBubbleText">嗨～我是 MOMO。点我一下，我帮你算一条最省时间的出车路线！</div>
+          <div class="mini-actions">
+            <button class="p" onclick="aiPlanRequest()">✨ 规划路线</button>
+            <button class="g" onclick="aiExecute()">🚀 出发</button>
+          </div>
+        </div>
+        <div class="sprite-col" id="aiSprite" onclick="pokeAssistant(event)" title="点我和 AI 助手聊两句">
+          <div class="glow"></div>
+          <span class="spark s1">✦</span><span class="spark s2">✧</span><span class="spark s3">✦</span>
+          <img class="sprite" src="/assets/ai-assistant.png" alt="AI 领航员 MOMO" draggable="false">
+          <button class="toggle" id="aiToggle" title="收起 / 展开对话" onclick="toggleAssistant(event)">–</button>
+        </div>
+      </div>
+    </div>
     <div class="hud">
       <div class="box">
         <div class="label">水箱水量</div>
@@ -116,8 +226,22 @@
         <button class="b-fault" onclick="post('/api/fault')">🛠 注入故障</button>
         <button class="b-check" onclick="post('/api/selfcheck')">🔍 立即自检</button>
         <button class="b-block" onclick="post('/api/obstacle?ahead=true')">🚧 前方放路障</button>
+        <button class="b-ai" style="grid-column:1 / -1" onclick="aiPlanRequest()">✨ AI 最优路线</button>
         <button class="b-reset" style="grid-column:1 / -1" onclick="resetSim()">↻ 重置仿真</button>
       </div>
+    </div>
+
+    <div class="card ai-card">
+      <h3>AI 最优路线 <span class="badge" id="aiBadge">待规划</span></h3>
+      <div id="aiPanel">
+        <div class="ai-empty">AI 会用 A* 算出目标点之间的最短路，再用 2-opt / 状态压缩 DP 排出访问顺序，最后把整条路线画在地图上。</div>
+      </div>
+      <div class="actions" style="grid-template-columns:1fr 1fr 1fr">
+        <button class="b-ai" onclick="aiPlanRequest()">✨ 规划</button>
+        <button class="b-go" onclick="aiExecute()">🚀 执行</button>
+        <button class="b-reset" onclick="aiCancel()">停止</button>
+      </div>
+      <div class="ai-note" id="aiAlgoNote">等待规划 · 有火情时规划灭火路线，无火情时自动改为全域巡检。</div>
     </div>
 
     <div class="card">
@@ -148,7 +272,8 @@ const COLORS = {
 };
 const STATE_NAMES = {
   idle:'待命', self_check:'全车自检中', to_fire:'赶赴火场', extinguishing:'喷水灭火中',
-  to_refill:'前往补水站', refilling:'补水 / 充电中', to_repair:'前往维修站', repairing:'维修中'
+  to_refill:'前往补水站', refilling:'补水 / 充电中', to_repair:'前往维修站', repairing:'维修中',
+  ai_mission:'AI 路线执行中', ai_scan:'AI 巡检扫描中'
 };
 const EMOJI_FONT = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
 
@@ -158,6 +283,21 @@ let city = null;
 let staticMap = null;
 let prevState = null, curState = null;
 let prevStamp = 0, curStamp = 0;
+
+/* ---- AI 领航员状态 ---- */
+let aiPlan = null;              // 最近一次 /api/ai/route 的结果
+let aiThinking = false;         // 正在请求规划
+let aiSayTimer = null;          // 打字机定时器
+let lastAiKey = 'off';          // AI 任务进度去重
+const AI_SKILLS = [
+  '我盯着路网呢：三纵三横 9 个路口，A* 一次搜索不到 1 毫秒。',
+  '小技巧：先跑远的点，2-opt 有时候能把绕回来的路砍掉一大截。',
+  '点「规划路线」，我把最省时的访问顺序排给你看～',
+  '我的小本本记着全城 12 个巡检点和 3 个服务站。',
+  '水量低于 10% 要记得补，别学我抱着书忘记喝水…',
+  '没有火情的时候，我会把整座城巡一遍，叫「预防性巡检」。'
+];
+let aiSkillIdx = 0;
 
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
@@ -455,6 +595,9 @@ function drawScene(now){
     ctx.restore();
   }
 
+  // AI 规划路线（在地面元素之上、车辆之下）
+  drawAiRoute(now);
+
   // 行人（位置插值，视觉更顺滑）
   for (const p of s.pedestrians){
     const old = findPrev('pedestrians', p.id);
@@ -480,6 +623,84 @@ function drawScene(now){
   ctx.fillText('状态：' + (STATE_NAMES[t.state] || t.state), 28, 34);
   ctx.fillStyle = '#8fa3bf'; ctx.font='11px "Microsoft YaHei",sans-serif';
   ctx.fillText(`速度 ${t.speed.toFixed(1)} ｜ 位置 (${t.x.toFixed(0)}, ${t.y.toFixed(0)})`, 28, 53);
+  ctx.restore();
+}
+
+/* ============================================================ AI 路线绘制 */
+function tracePath(pts){
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+}
+
+function drawAiRoute(now){
+  const ai = curState && curState.ai;
+  const active = !!(ai && ai.active);
+  const plan = aiPlan;
+  const poly = active ? (ai.polyline || []) : (plan && plan.ok ? plan.polyline : null);
+  if (!poly || poly.length < 2) return;
+  const stops = active ? (ai.stops || []) : (plan.stops || []);
+  const visited = active ? (ai.visited || []) : [];
+  const current = active ? ai.index : -1;
+
+  ctx.save();
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+  // 底层光晕
+  ctx.strokeStyle = active ? 'rgba(192,132,252,.16)' : 'rgba(56,189,248,.13)';
+  ctx.lineWidth = 18;
+  tracePath(poly); ctx.stroke();
+
+  // 流动虚线
+  ctx.setLineDash([14, 12]);
+  ctx.lineDashOffset = -now / 38;
+  ctx.strokeStyle = active ? 'rgba(216,180,254,.95)' : 'rgba(125,211,252,.9)';
+  ctx.lineWidth = 3.2;
+  ctx.shadowColor = active ? '#a855f7' : '#38bdf8';
+  ctx.shadowBlur = 12;
+  tracePath(poly); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.shadowBlur = 0;
+
+  // 起点光环
+  ctx.beginPath();
+  ctx.arc(poly[0][0], poly[0][1], 7, 0, Math.PI * 2);
+  ctx.fillStyle = active ? 'rgba(216,180,254,.9)' : 'rgba(125,211,252,.9)';
+  ctx.fill();
+
+  // 停靠点编号
+  stops.forEach((st, i) => {
+    const done = visited.indexOf(st.order) >= 0;
+    const isNow = i === current;
+    const r = isNow ? 12 + Math.sin(now / 180) * 1.6 : 9.5;
+    if (isNow){
+      ctx.beginPath();
+      ctx.arc(st.x, st.y, 17 + 6 * Math.sin(now / 220), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(244,114,182,.16)';
+      ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(st.x, st.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = done ? 'rgba(15,118,110,.95)' : isNow ? 'rgba(219,39,119,.95)' : 'rgba(12,22,38,.92)';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = done ? '#5eead4' : '#f9a8d4';
+    ctx.stroke();
+    ctx.fillStyle = done ? '#ccfbf1' : '#ffe4f3';
+    ctx.font = `bold ${isNow ? 12 : 10.5}px Consolas, monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(done ? '✓' : String(st.order), st.x, st.y + 0.5);
+
+    if (isNow){
+      const label = st.label;
+      ctx.font = '11px "Microsoft YaHei",sans-serif';
+      const w = ctx.measureText(label).width + 14;
+      ctx.fillStyle = 'rgba(60,12,45,.88)';
+      roundRect(ctx, st.x - w / 2, st.y - 36, w, 19, 9); ctx.fill();
+      ctx.strokeStyle = 'rgba(244,114,182,.5)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = '#ffe4f3';
+      ctx.fillText(label, st.x, st.y - 26.5);
+    }
+  });
   ctx.restore();
 }
 
@@ -526,6 +747,180 @@ function renderState(s){
   ).join('');
 }
 
+/* ============================================================ AI 领航员 */
+function say(text, status){
+  const el = $('aiBubbleText'), st = $('aiBubbleStatus');
+  if (status) st.textContent = status;
+  if (aiSayTimer) { clearInterval(aiSayTimer); aiSayTimer = null; }
+  el.textContent = '';
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  caret.textContent = '▍';
+  el.appendChild(caret);
+  let i = 0;
+  aiSayTimer = setInterval(() => {
+    if (i >= text.length){
+      clearInterval(aiSayTimer); aiSayTimer = null; caret.remove(); return;
+    }
+    caret.insertAdjacentText('beforebegin', text[i++]);
+  }, 14);
+}
+
+function aiMood(mode){
+  $('assistant').classList.toggle('thinking', mode === 'thinking');
+}
+
+function pokeAssistant(ev){
+  if (ev) ev.stopPropagation();
+  const box = $('assistant');
+  box.classList.remove('poked');
+  void box.offsetWidth;
+  box.classList.add('poked');
+  setTimeout(() => box.classList.remove('poked'), 620);
+  if (aiThinking){
+    say('别催别催，正在算呢——目标一多，组合就多啦。', '计算中');
+    return;
+  }
+  say(AI_SKILLS[aiSkillIdx % AI_SKILLS.length], '闲聊中');
+  aiSkillIdx++;
+}
+
+function toggleAssistant(ev){
+  if (ev) ev.stopPropagation();
+  const box = $('assistant');
+  const min = box.classList.toggle('min');
+  $('aiToggle').textContent = min ? '✦' : '–';
+  $('aiToggle').title = min ? '展开对话' : '收起对话';
+}
+
+function stopListHtml(stops, visited, current){
+  return stops.map((st, i) => {
+    const done = visited.indexOf(st.order) >= 0;
+    const cls = done ? 'done' : (i === current ? 'now' : '');
+    const num = done ? '✓' : st.order;
+    return `<li class="${cls}"><span class="num">${num}</span><span>${st.label}</span>`
+      + `<span class="dist">${Math.round(st.leg_distance)}</span></li>`;
+  }).join('');
+}
+
+function renderAiPanel(){
+  const ai = (curState && curState.ai) || {};
+  const badge = $('aiBadge'), panel = $('aiPanel'), note = $('aiAlgoNote');
+  if (ai.active){
+    badge.textContent = `执行中 ${Math.min(ai.index + 1, ai.total)}/${ai.total}`;
+    badge.className = 'badge run';
+    panel.innerHTML = `
+      <div class="ai-metrics" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="m"><b>${Math.round(ai.total_distance || 0)}</b><span>总里程</span></div>
+        <div class="m"><b>${Math.round(ai.eta || 0)}s</b><span>预计</span></div>
+        <div class="m"><b>${(ai.visited || []).length}</b><span>已完成</span></div>
+      </div>
+      <ul class="ai-stops">${stopListHtml(ai.stops || [], ai.visited || [], ai.index)}</ul>`;
+    note.textContent = `车辆已由 AI 接管 · ${ai.mode_label} · 点「停止」可交还调度`;
+    return;
+  }
+  if (aiPlan && aiPlan.ok){
+    const p = aiPlan;
+    const short = { '原始顺序': '原始', '最近邻贪心': '贪心', '最近邻 + 2-opt': '2-opt',
+                    '状态压缩 DP（精确最优）': 'DP' };
+    const cands = (p.algorithm.candidates || [])
+      .map(c => `${short[c.name] || c.name} ${Math.round(c.distance)}`).join(' · ');
+    badge.textContent = '已规划';
+    badge.className = 'badge ok';
+    panel.innerHTML = `
+      <div class="ai-metrics">
+        <div class="m"><b>${Math.round(p.total_distance)}</b><span>最优总里程</span></div>
+        <div class="m"><b>-${Math.round(p.saved_distance)}</b><span>比原顺序省 ${p.saved_percent}%</span></div>
+      </div>
+      <ul class="ai-stops">${stopListHtml(p.stops, [], -1)}</ul>
+      <div class="ai-note" style="margin:0 0 6px">候选方案：${cands}</div>`;
+    note.textContent = `${p.mode_label} · ${p.algorithm.name} · 预计 ${Math.round(p.eta)} 秒 · 点「执行」让小车出发`;
+    return;
+  }
+  badge.textContent = '待规划';
+  badge.className = 'badge';
+  panel.innerHTML = '<div class="ai-empty">AI 会用 A* 算出目标点之间的最短路，再用 2-opt / 状态压缩 DP 排出访问顺序，最后把整条路线画在地图上。</div>';
+  note.textContent = `等待规划 · 当前 ${(curState && curState.fires) ? curState.fires.length : 0} 处火情`;
+}
+
+async function postJson(url){
+  const res = await fetch(url, { method: 'POST' });
+  return await res.json();
+}
+
+async function aiPlanRequest(){
+  if (aiThinking){ say('马上就好，正算到一半～', '计算中'); return; }
+  aiThinking = true;
+  aiMood('thinking');
+  say('先给每对目标点跑一次 A*，再比较「原始顺序 / 最近邻 / 2-opt / 精确 DP」……', '计算中');
+  try {
+    const plan = await postJson('/api/ai/route');
+    if (!plan.ok){
+      aiPlan = null;
+      renderAiPanel();
+      say(plan.reason || '现在没有可规划的目标，先点「模拟火情」给我找点活干～', '待命');
+      return;
+    }
+    aiPlan = plan;
+    renderAiPanel();
+    const kind = plan.mode === 'fire' ? '灭火' : '巡检';
+    say(`算完啦！${kind} ${plan.stops.length} 个点，最优 ${Math.round(plan.total_distance)} 米，`
+      + `比按发现顺序少跑 ${Math.round(plan.saved_distance)} 米（${plan.saved_percent}%）。点「出发」我带路！`, '已规划');
+  } catch (e){
+    aiPlan = null;
+    renderAiPanel();
+    say('连不上后端……先确认 uvicorn 还开着哦。', '出错了');
+  } finally {
+    aiThinking = false;
+    aiMood('idle');
+  }
+}
+
+async function aiExecute(){
+  if (aiThinking) return;
+  try {
+    const res = await postJson('/api/ai/execute');
+    if (!res.ok){
+      say(res.msg || res.reason || '现在还不能出发～', '待命');
+      return;
+    }
+    aiPlan = null;
+    say(`出发！按 AI 排好的顺序跑 ${res.stops} 站，预计 ${Math.round(res.eta)} 秒。`, '执行中');
+    await pull();
+  } catch (e){
+    say('执行失败，检查一下后端连接。', '出错了');
+  }
+}
+
+async function aiCancel(){
+  try {
+    const res = await postJson('/api/ai/cancel');
+    await pull();
+    say(res.ok ? '好，靠边停车～AI 任务已取消，手动按钮交还给你。' : '现在没有正在执行的 AI 路线哦。', '待命');
+  } catch (e){
+    say('取消失败，检查一下后端连接。', '出错了');
+  }
+}
+
+function handleAiState(s){
+  const ai = s.ai || {};
+  const key = ai.active ? `${ai.index}/${ai.total}` : 'off';
+  if (key === lastAiKey) return;
+  const wasActive = lastAiKey !== 'off';
+  lastAiKey = key;
+  if (ai.active){
+    const st = (ai.stops || [])[ai.index];
+    if (ai.index === 0){
+      say(`AI 已接管：${ai.mode_label}，共 ${ai.total} 站。第一站 ${st ? st.label : '出发'}。`, '执行中');
+    } else {
+      say(`第 ${ai.index + 1}/${ai.total} 站：${st ? st.label : '继续'}，出发～`, '执行中');
+    }
+  } else if (wasActive){
+    say('任务收工！所有站点都处理完啦，我回待命点看书去咯。', '待命');
+  }
+  renderAiPanel();
+}
+
 /* ============================================================ 网络与主循环 */
 async function post(url){
   try {
@@ -551,6 +946,7 @@ async function pull(){
     curState = s;
     curStamp = performance.now();
     renderState(s);
+    handleAiState(s);
   } catch(e){
     $('alerts').innerHTML = '<li class="critical">连不上后端：请先运行 uvicorn main:app --reload</li>';
   }
@@ -569,6 +965,7 @@ async function boot(){
     $('alerts').innerHTML = '<li class="critical">城市地图加载失败，请检查后端</li>';
   }
   await pull();
+  renderAiPanel();
   setInterval(pull, 220);
   requestAnimationFrame(animate);
 }
