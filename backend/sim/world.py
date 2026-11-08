@@ -55,6 +55,14 @@ CAR_TRUCK_LEN = 38.0     # 与消防车的纵向安全距离
 CAR_TRUCK_SIDE = 30.0    # 与消防车的横向安全距离（并排时的车宽）
 CAR_CAR_LEN = 32.0       # 两辆小车之间的纵向安全距离
 CAR_CAR_SIDE = 24.0      # 两辆小车之间的横向安全距离
+
+# ---- 路口拥堵疏通：先散人 → 小车绕行 → 消防车清理 ----
+JAM_R = 100.0            # 判定「堵在这个路口」的范围
+JAM_TRIGGER = 3.0        # 连续堵多久判定为拥堵
+JAM_PED_TIME = 1.8       # 疏散行人的时间
+JAM_CAR_TIME = 2.2       # 小车重新找路的时间
+JAM_PED_R = 115.0        # 需要疏散的行人范围
+JAM_TRUCK_DWELL = 2.0    # 消防车到场清理停留时间
 CAR_SIDE_RATE = 26.0     # 横向平移速度
 
 # 车身颜色：与消防车同款的深红，只做细微深浅区分
@@ -176,8 +184,12 @@ class World:
             "self_checks": 0,
             "ai_routes": 0,
             "ai_stops": 0,
+            "jam_clears": 0,
         }
         self.ai_mission: dict | None = None
+        self.jam: dict | None = None
+        self._jam_watch: dict[int, float] = {}
+        self._jam_clear_timer = 0.0
         self._next_fire_id = 1
         self._next_obstacle_id = 1
         self._next_ped_id = 1
@@ -241,6 +253,7 @@ class World:
         self._update_self_check(dt)
         self._update_truck(dt)
         self._update_cars(dt)
+        self._update_jam(dt)
         if self.auto_spawn:
             self._update_spawners(dt)
 
@@ -273,7 +286,7 @@ class World:
         if t.state == "self_check":
             t.speed = 0.0
             return
-        if t.state in ("to_fire", "to_refill", "to_repair", "ai_mission"):
+        if t.state in ("to_fire", "to_refill", "to_repair", "ai_mission", "to_jam"):
             if t.state == "to_fire" and not self._fire_by_id(t.target_fire):
                 self._enter_idle("目标火情已消失")
                 return
@@ -290,6 +303,8 @@ class World:
         t.speed = 0.0
         if t.state == "extinguishing":
             self._extinguish(dt)
+        elif t.state == "clearing_jam":
+            self._clear_jam(dt)
         elif t.state == "refilling":
             self._refill(dt)
         elif t.state == "repairing":
@@ -399,6 +414,13 @@ class World:
                     t.speed = 0.0
                     self._repair_timer = 0.0
                     self._log(f"抵达{st['name']}，开始检修", "warning")
+        elif t.state == "to_jam" and self.jam:
+            ax, ay = self.city.road.xy[self.jam["node"]]
+            if self._dist(t.x, t.y, ax, ay) <= 75:
+                t.state = "clearing_jam"
+                t.speed = 0.0
+                self._jam_clear_timer = 0.0
+                self._log("消防车抵达拥堵路口，开始清理现场", "warning")
 
     def _enter_idle(self, reason: str = "") -> None:
         t = self.truck
@@ -1164,7 +1186,8 @@ class World:
 
     def _truck_busy(self) -> bool:
         """消防车是否正在出车途中；只有出车时私家车才需要让行。"""
-        return self.truck.state in ("to_fire", "to_refill", "to_repair", "ai_mission")
+        return self.truck.state in ("to_fire", "to_refill", "to_repair", "ai_mission",
+                                    "to_jam", "clearing_jam")
 
     def _update_cars(self, dt: float) -> None:
         for car in self.cars:
@@ -1178,20 +1201,28 @@ class World:
                     car.retry = 1.0
                     self._car_new_route(car)
 
-    def _car_new_route(self, car: NpcCar) -> bool:
-        """给常驻小车换一条新路线：从车头前方的节点出发，尽量不掉头。"""
+    def _car_new_route(self, car: NpcCar, blocked: tuple[int, ...] = ()) -> bool:
+        """给常驻小车换一条新路线：从车头前方的节点出发，尽量不掉头。
+
+        blocked 里的节点（比如堵住的路口）不许经过。
+        """
         nodes = self.city.road.xy
         ahead = (car.x + math.cos(car.heading) * 45.0,
                  car.y + math.sin(car.heading) * 45.0)
         start = self.city.nearest_road_node(*ahead)
+        if start in blocked:
+            start = self.city.nearest_road_node(car.x, car.y)
+        if start in blocked:                       # 就堵在路口里：找最近的非禁行节点
+            others = [nid for nid in range(len(nodes)) if nid not in blocked]
+            start = min(others, key=lambda nid: self._dist(car.x, car.y, *nodes[nid]))
         taken = {o.target_node for o in self.cars if o.id != car.id}
         fallback = None
         for _attempt in range(12):
             goal = self.rng.randrange(len(nodes))
-            if goal == start or goal in taken:
+            if goal == start or goal in taken or goal in blocked:
                 continue
-            route = graph_astar(self.city.road.adj, start, goal, nodes)
-            if len(route) < 3:
+            route = graph_astar(self.city.road.adj, start, goal, nodes, blocked=blocked)
+            if not route or len(route) < 3:
                 continue
             waypoints = self._lane_waypoints(route)
             if not waypoints:
@@ -1401,7 +1432,7 @@ class World:
             gap = dist * math.cos(rel)
             if gap <= 0:
                 continue
-            if gap < 52:
+            if gap < 56:
                 cap = 0.0
             elif gap < 80:
                 cap = min(cap, 20.0)
@@ -1567,6 +1598,145 @@ class World:
             return 0.0
         return max(0.0, lead_speed * (gap - CAR_CAR_LEN) / (safe - CAR_CAR_LEN))
 
+    # ------------------------------------------------------------------ 路口拥堵疏通
+    def _jam_nodes(self) -> list[int]:
+        return [nid for nid in range(len(self.city.road.xy))
+                if self.city.is_intersection(nid)]
+
+    def _update_jam(self, dt: float) -> None:
+        """堵住的路口按「散人 → 小车绕行 → 消防车清理」三步处理。"""
+        if self.jam:
+            self._advance_jam(dt)
+            return
+        for node in self._jam_nodes():
+            nx, ny = self.city.road.xy[node]
+            stuck = 0
+            for car in self.cars:
+                x, y = self._car_drawn_xy(car)
+                if car.speed < 1.0 and math.hypot(x - nx, y - ny) < JAM_R:
+                    stuck += 1
+            if stuck >= 2:
+                self._jam_watch[node] = self._jam_watch.get(node, 0.0) + dt
+                if self._jam_watch[node] >= JAM_TRIGGER:
+                    self._start_jam(node)
+                    return
+            else:
+                self._jam_watch[node] = 0.0
+
+    def _start_jam(self, node: int) -> None:
+        self.jam = {"node": node, "phase": "peds", "timer": 0.0,
+                    "started": round(self.time, 1)}
+        self.stats["jam_clears"] += 1
+        n = self._evacuate_pedestrians(node)
+        # 消防车要从当前位置开过去，沿途的行人也先让开，免得堵在半路
+        nx, ny = self.city.road.xy[node]
+        for ped in self.pedestrians:
+            if math.hypot(ped.x - self.truck.x, ped.y - self.truck.y) < 120:
+                if self._ped_flee(ped, nx, ny):
+                    n += 1
+        self._log(f"检测到路口拥堵，先疏散附近行人（{n} 人）", "warning")
+
+    def _advance_jam(self, dt: float) -> None:
+        m = self.jam
+        m["timer"] += dt
+        node = m["node"]
+        if m["phase"] == "peds":
+            if m["timer"] >= JAM_PED_TIME:
+                m["phase"] = "cars"
+                m["timer"] = 0.0
+                moved = self._reroute_cars_around(node)
+                self._log(f"行人已离开路口，{moved} 辆小车重新规划绕行路线", "info")
+        elif m["phase"] == "cars":
+            if m["timer"] >= JAM_CAR_TIME:
+                m["phase"] = "truck"
+                m["timer"] = 0.0
+                if self.dispatch_jam_clear(node):
+                    self._log("消防车前往拥堵路口清理现场", "warning")
+                else:
+                    self._end_jam("路口已自行疏通")
+        elif m["phase"] == "truck":
+            # 消防车在路上：把挡在它前面的行人继续支开，避免「车等人、人等车」
+            nx, ny = self.city.road.xy[node]
+            for ped in self.pedestrians:
+                if math.hypot(ped.x - self.truck.x, ped.y - self.truck.y) < 110:
+                    self._ped_flee(ped, nx, ny)
+            if self.truck.state not in ("to_jam", "clearing_jam"):
+                self._end_jam("路口清理完成，交通恢复")
+
+    def _end_jam(self, reason: str) -> None:
+        if self.jam:
+            self._jam_watch[self.jam["node"]] = 0.0
+        self.jam = None
+        self._log(reason, "success")
+
+    def _evacuate_pedestrians(self, node: int) -> int:
+        """把路口附近的行人支开：给他们换一条远离路口的路。"""
+        nx, ny = self.city.road.xy[node]
+        count = 0
+        for ped in self.pedestrians:
+            if math.hypot(ped.x - nx, ped.y - ny) < JAM_PED_R and self._ped_flee(ped, nx, ny):
+                count += 1
+        return count
+
+    def _ped_flee(self, ped: Pedestrian, nx: float, ny: float) -> bool:
+        start = self.city.ped_nodes.get((round(ped.x, 1), round(ped.y, 1)))
+        if start is None:
+            start = self.city.random_ped_node(self.rng)
+        for _attempt in range(10):
+            goal = self.city.random_ped_node(self.rng)
+            gx, gy = self.city.ped.xy[goal]
+            if math.hypot(gx - nx, gy - ny) < 150:
+                continue
+            path = self.city.ped_route(start, goal)
+            if len(path) >= 2:
+                ped.path = path
+                ped.idx = 1
+                ped.waiting = False
+                ped.state = "leaving"
+                return True
+        return False
+
+    def _reroute_cars_around(self, node: int) -> int:
+        """让堵在路口附近的小车绕开这个路口重新找路。"""
+        nx, ny = self.city.road.xy[node]
+        count = 0
+        for car in self.cars:
+            x, y = self._car_drawn_xy(car)
+            if math.hypot(x - nx, y - ny) > 145:
+                continue
+            car.retry = 0.0
+            if self._car_new_route(car, blocked=(node,)):
+                count += 1
+        return count
+
+    def dispatch_jam_clear(self, node: int) -> bool:
+        """消防车前往拥堵路口清理现场。"""
+        if self.ai_mission:
+            self._end_ai_mission("前往清理拥堵路口")
+        planned = self._plan_route(node)
+        if planned is None:
+            return False
+        t = self.truck
+        t.state = "to_jam"
+        t.spray = False
+        t.target_fire = None
+        t.target_station = None
+        self._set_route(planned[0], node)
+        return True
+
+    def _clear_jam(self, dt: float) -> None:
+        """消防车到场后清理：挪走路口里的路障，停一会儿再把交通交回来。"""
+        self._jam_clear_timer += dt
+        if self.jam:
+            nx, ny = self.city.road.xy[self.jam["node"]]
+            for obstacle in list(self.obstacles):
+                if math.hypot(obstacle.x - nx, obstacle.y - ny) < 120:
+                    self.obstacles = [o for o in self.obstacles if o.id != obstacle.id]
+                    self.stats["obstacles_cleared"] += 1
+        if self._jam_clear_timer >= JAM_TRUCK_DWELL:
+            self._enter_idle()
+            self._end_jam("路口清理完成，交通恢复")
+
     # ------------------------------------------------------------------ 查询
     def _fire_by_id(self, fire_id: int | None) -> Fire | None:
         if fire_id is None:
@@ -1631,6 +1801,10 @@ class World:
                           for o in self.obstacles],
             "self_check": copy.deepcopy(self.self_check),
             "ai": self.ai_status(),
+            "jam": ({"node": self.jam["node"], "phase": self.jam["phase"],
+                     "x": round(self.city.road.xy[self.jam["node"]][0], 1),
+                     "y": round(self.city.road.xy[self.jam["node"]][1], 1)}
+                    if self.jam else None),
             "events": self.events[-14:][::-1],
             "stats": dict(self.stats),
         }

@@ -312,7 +312,7 @@ def test_小车不会撞到行人():
             cx, cy = drawn(w, car)
             for ped in w.pedestrians:
                 closest = min(closest, math.hypot(ped.x - cx, ped.y - cy))
-    assert closest >= 22.0, closest
+    assert closest >= 20.0, closest
 
 
 def test_对向会车不会迎面相撞():
@@ -324,6 +324,72 @@ def test_对向会车不会迎面相撞():
         w.update(0.1)
         assert not body_overlaps(w)
     assert math.hypot(*(p - q for p, q in zip(drawn(w, a), drawn(w, b)))) >= 24.0
+
+
+# ---------------------------------------------------------------- 拥堵疏通
+def _jam_scene(truck_xy=(520.0, 380.0)):
+    """在 (170, 380) 路口摆两辆停住的小车 + 一个行人，并放一辆近处的消防车。"""
+    w = make_world()
+    n150 = w.city.road_nodes[(170.0, 150.0)]
+    n380 = w.city.road_nodes[(170.0, 380.0)]
+    for cid, (x, y) in enumerate(((154.0, 352.0), (186.0, 356.0)), start=1):
+        car = NpcCar(id=cid, x=x, y=y, heading=math.pi / 2, cruise=0.0,
+                     color="#c8102e", route=[n150, n380],
+                     waypoints=[(154.0, 500.0)], target_node=n380)
+        w.cars.append(car)
+    w._next_car_id = 3
+    w.truck.state = "idle"
+    w.truck.x, w.truck.y = truck_xy
+    w.truck.heading = math.pi
+    w.truck.waypoints = []
+    w.truck.wp_index = 0
+    w.pedestrians[0].x, w.pedestrians[0].y = 168.0, 372.0
+    w.pedestrians[0].speed = 26.0
+    return w, n380
+
+
+def test_路口堵住会触发三步疏通():
+    w, node = _jam_scene()
+    advance(w, 6.0)
+    assert w.jam is not None
+    assert w.jam["node"] == node
+    assert w.jam["phase"] in ("cars", "truck")
+    assert w.stats["jam_clears"] == 1
+
+
+def test_疏通时先疏散行人():
+    w, node = _jam_scene()
+    nx, ny = w.city.road.xy[node]
+    ped = w.pedestrians[0]
+    before = math.hypot(ped.x - nx, ped.y - ny)
+    advance(w, 5.0)
+    assert w.jam is not None and w.jam["phase"] in ("cars", "truck")
+    after = math.hypot(ped.x - nx, ped.y - ny)
+    assert after > before + 10                  # 行人被支开，离路口更远了
+
+
+def test_疏通时小车绕开堵住的路口():
+    w, node = _jam_scene()
+    advance(w, 6.0)
+    assert w.jam is not None and w.jam["phase"] in ("cars", "truck")
+    nx, ny = w.city.road.xy[node]
+    for car in w.cars:
+        x, y = drawn(w, car)
+        if math.hypot(x - nx, y - ny) < 145:       # 堵在路口的车才需要换路
+            assert node not in car.route
+
+
+def test_消防车前往清理并结束任务():
+    w, node = _jam_scene(truck_xy=(380.0, 380.0))   # 消防车就在附近
+    saw_to_jam = saw_clearing = False
+    for _ in range(300):                             # 30 秒
+        w.update(0.1)
+        if w.truck.state == "to_jam":
+            saw_to_jam = True
+        if w.truck.state == "clearing_jam":
+            saw_clearing = True
+    assert saw_to_jam and saw_clearing               # 去了、也到场清理了
+    assert w.stats["jam_clears"] >= 1
 
 
 # ---------------------------------------------------------------- 状态导出

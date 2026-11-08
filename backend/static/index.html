@@ -628,6 +628,27 @@ function drawScene(now){
 
   drawSignals(s);
 
+  // 路口拥堵 / 清理中
+  if (s.jam){
+    const jx = s.jam.x, jy = s.jam.y;
+    const phase = s.jam.phase === 'peds' ? '疏散行人' : s.jam.phase === 'cars' ? '小车绕行' : '消防车清理';
+    const r = 46 + 5*Math.sin(now/180);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(248,113,113,.9)'; ctx.lineWidth = 2;
+    ctx.setLineDash([8,6]); ctx.lineDashOffset = -now/50;
+    ctx.beginPath(); ctx.arc(jx, jy, r, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(248,113,113,.92)';
+    ctx.font = '11px "Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const label = '路口拥堵 · ' + phase;
+    const w = ctx.measureText(label).width + 14;
+    roundRect(ctx, jx - w/2, jy - r - 22, w, 18, 9); ctx.fill();
+    ctx.fillStyle = '#0b1220';
+    ctx.fillText(label, jx, jy - r - 13);
+    ctx.restore();
+  }
+
   // 火情
   for (const f of s.fires) drawFire(f, now);
 
