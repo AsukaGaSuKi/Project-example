@@ -540,24 +540,24 @@ function drawTruck(t, s, now){
 
   // 自检扫描圈（放在车下面）
   if (checking){
-    const r = 40 + 6*Math.sin(now/140);
+    const r = 30 + 5*Math.sin(now/140);
     ctx.strokeStyle = 'rgba(56,189,248,.8)'; ctx.lineWidth = 2;
     ctx.setLineDash([7,7]); ctx.lineDashOffset = -now/40;
     ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = 'rgba(56,189,248,.9)'; ctx.font = '11px "Microsoft YaHei",sans-serif';
-    ctx.textAlign='center'; ctx.fillText('自检扫描', x, y-52);
+    ctx.textAlign='center'; ctx.fillText('自检扫描', x, y-40);
   }
 
   // 车身阴影
   ctx.fillStyle = 'rgba(0,0,0,.42)';
-  ctx.beginPath(); ctx.ellipse(x+3,y+8,25,15,heading,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+2,y+6,15,9,heading,0,Math.PI*2); ctx.fill();
 
   // 消防车（系统 emoji，不做自定义贴图）
   ctx.save();
   ctx.translate(x,y);
   ctx.rotate(heading + Math.PI);
-  ctx.font = '42px ' + EMOJI_FONT;
+  ctx.font = '26px ' + EMOJI_FONT;
   ctx.textAlign='center'; ctx.textBaseline='middle';
   ctx.fillText('🚒', 0, 0);
   ctx.restore();
@@ -565,10 +565,10 @@ function drawTruck(t, s, now){
   // 故障标记
   if (t.fault){
     ctx.fillStyle = 'rgba(239,68,68,.95)';
-    roundRect(ctx,x+20,y-44,38,18,9); ctx.fill();
+    roundRect(ctx,x+12,y-32,34,16,8); ctx.fill();
     ctx.fillStyle='#fff'; ctx.font='10px "Microsoft YaHei",sans-serif';
     ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText('故障', x+39, y-35);
+    ctx.fillText('故障', x+29, y-24);
   }
 
   // 机械臂：从车头伸向路障
@@ -602,12 +602,12 @@ function drawTruck(t, s, now){
   }
 
   // 车顶水量条
-  const bw = 44, bh = 5;
+  const bw = 30, bh = 4;
   ctx.fillStyle='rgba(6,12,22,.8)';
-  roundRect(ctx,x-bw/2,y-40,bw,bh,2.5); ctx.fill();
+  roundRect(ctx,x-bw/2,y-28,bw,bh,2); ctx.fill();
   const ratio = clamp(t.water/100,0,1);
   ctx.fillStyle = ratio < .1 ? '#ef4444' : ratio < .25 ? '#f59e0b' : '#38bdf8';
-  roundRect(ctx,x-bw/2,y-40,bw*ratio,bh,2.5); ctx.fill();
+  roundRect(ctx,x-bw/2,y-28,bw*ratio,bh,2); ctx.fill();
 }
 
 function findPrev(list, id){
