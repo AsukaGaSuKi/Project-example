@@ -105,4 +105,24 @@ def api_reset():
     return {"ok": True}
 
 
+@app.post("/api/ai/route")
+def api_ai_route():
+    """AI 最优路线：A* 求两两最短路 + DP / 2-opt 求访问顺序，只规划不执行。"""
+    with world_lock:
+        return world.plan_ai_route()
+
+
+@app.post("/api/ai/execute")
+def api_ai_execute():
+    """AI 接管：车辆按规划好的顺序依次前往各目标点。"""
+    with world_lock:
+        return world.execute_ai_route()
+
+
+@app.post("/api/ai/cancel")
+def api_ai_cancel():
+    with world_lock:
+        return world.cancel_ai()
+
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

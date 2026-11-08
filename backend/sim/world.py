@@ -18,6 +18,7 @@ import random
 from dataclasses import dataclass, field
 
 from algo.pathfinding import graph_astar
+from algo.route_planner import plan as plan_multi_route
 from sim.city import CityMap
 
 BASE_SPEED = 95.0        # 正常巡航速度（单位/秒）
@@ -32,6 +33,8 @@ SPRAY_WATER = 7.0        # 灭火耗水（%/秒）
 SPRAY_POWER = 24.0       # 灭火强度下降（点/秒）
 REPAIR_TIME = 4.0
 SELF_CHECK_STEP = 0.38   # 每个自检项目耗时
+AI_SCAN_TIME = 1.4       # AI 巡检点在点停留时间（秒）
+AI_ARRIVE = 42.0         # 判定「到达停靠点」的距离
 
 FAULT_NAMES = {
     "arm": "机械臂",
@@ -120,7 +123,10 @@ class World:
             "repairs": 0,
             "obstacles_cleared": 0,
             "self_checks": 0,
+            "ai_routes": 0,
+            "ai_stops": 0,
         }
+        self.ai_mission: dict | None = None
         self._next_fire_id = 1
         self._next_obstacle_id = 1
         self._next_ped_id = 1
@@ -204,9 +210,14 @@ class World:
         if t.state == "self_check":
             t.speed = 0.0
             return
-        if t.state in ("to_fire", "to_refill", "to_repair"):
+        if t.state in ("to_fire", "to_refill", "to_repair", "ai_mission"):
             if t.state == "to_fire" and not self._fire_by_id(t.target_fire):
                 self._enter_idle("目标火情已消失")
+                return
+            if t.state == "ai_mission":
+                self._update_arm(dt)
+                self._drive(dt, self._target_speed())
+                self._check_ai_arrival()
                 return
             self._update_arm(dt)
             target_speed = self._target_speed()
@@ -220,6 +231,8 @@ class World:
             self._refill(dt)
         elif t.state == "repairing":
             self._repair(dt)
+        elif t.state == "ai_scan":
+            self._ai_scan(dt)
         elif t.state == "idle":
             self._idle()
 
@@ -339,12 +352,18 @@ class World:
         fire = self._fire_by_id(t.target_fire)
         if fire is None:
             t.spray = False
-            self._enter_idle()
+            if self.ai_mission:
+                self._advance_ai("目标火情已消失，继续 AI 路线")
+            else:
+                self._enter_idle()
             return
         if self._dist(t.x, t.y, fire.x, fire.y) > 100:
             t.spray = False
-            t.state = "to_fire"
-            self._plan_to_fire(fire)
+            if self.ai_mission:
+                self._ai_goto(self.ai_mission["index"])     # 沿 AI 路线重新贴近火点
+            else:
+                t.state = "to_fire"
+                self._plan_to_fire(fire)
             return
         t.spray = True
         t.water = max(0.0, t.water - SPRAY_WATER * dt)
@@ -352,6 +371,7 @@ class World:
         if t.water <= 0:
             t.spray = False
             self._log("灭火剂耗尽，火情未完全扑灭，立即前往最近补水站", "critical")
+            self._end_ai_mission("水量耗尽，AI 任务中断")
             self.dispatch_refill(resume_fire=fire.id)
             return
         if fire.intensity <= 0:
@@ -359,6 +379,9 @@ class World:
             self.stats["fires_out"] += 1
             t.spray = False
             self._log(f"火情 #{fire.id} 已扑灭（剩余水量 {t.water:.0f}%）", "success")
+            if self.ai_mission:
+                self._advance_ai(f"火情 #{fire.id} 已扑灭，AI 路线继续")
+                return
             if t.water < WATER_LOW:
                 self.dispatch_refill()
             else:
@@ -494,6 +517,8 @@ class World:
 
     def dispatch_refill(self, resume_fire: int | None = None) -> bool:
         t = self.truck
+        if self.ai_mission:
+            self._end_ai_mission("水量偏低，转入补水流程")
         best = self._nearest_station("refill")
         if best is None:
             self._log("所有补水站都不可达，等待人工处理", "critical")
@@ -513,6 +538,8 @@ class World:
 
     def dispatch_repair(self) -> bool:
         t = self.truck
+        if self.ai_mission:
+            self._end_ai_mission("车辆故障，转入维修流程")
         best = self._nearest_station("repair")
         if best is None:
             self._log("维修站不可达，等待人工处理", "critical")
@@ -528,10 +555,227 @@ class World:
         self._log(f"检测到{FAULT_NAMES.get(t.fault or '', '功能')}故障，前往{st['name']}", "critical")
         return True
 
+    # ------------------------------------------------------------------ AI 最优路线
+    def _ai_targets(self) -> list[dict]:
+        """当前值得跑一趟的目标点：有火情就去火情，没有就做全域巡检。"""
+        targets = []
+        for fire in sorted(self.fires, key=lambda f: f.id):
+            if fire.intensity <= 0:
+                continue
+            targets.append({
+                "node": fire.anchor_node,
+                "kind": "fire",
+                "label": f"火情 #{fire.id}",
+                "fire_id": fire.id,
+                "intensity": round(fire.intensity),
+            })
+        if not targets:
+            for i, spot in enumerate(self.city.fire_spots):
+                targets.append({
+                    "node": spot["node"],
+                    "kind": "patrol",
+                    "label": f"巡检点 {i + 1}",
+                })
+        return targets
+
+    def plan_ai_route(self) -> dict:
+        """只做规划，不改变车辆状态；供按钮点击和「执行」前的预演使用。"""
+        t = self.truck
+        if self.self_check["running"]:
+            return {"ok": False, "reason": "全车自检进行中，稍后再规划路线"}
+        start = self.city.nearest_road_node(t.x, t.y)
+        targets = self._ai_targets()
+        result = plan_multi_route(
+            self.city.road.adj, self.city.road.xy, start, targets,
+            start_point=(round(t.x, 1), round(t.y, 1)),
+        )
+        if not result.get("ok"):
+            return result
+
+        has_fire = any(x["kind"] == "fire" for x in targets)
+        result["mode"] = "fire" if has_fire else "patrol"
+        result["mode_label"] = "多火情最优处置路线" if has_fire else "全域预防性巡检路线"
+        result["polyline"] = [[round(t.x, 1), round(t.y, 1)]] + [
+            [round(x, 1), round(y, 1)]
+            for x, y in self._lane_waypoints(result["path_nodes"])
+        ]
+        result["truck"] = {"x": round(t.x, 1), "y": round(t.y, 1), "state": t.state}
+        result["explanation"] = [
+            f"识别到 {result['algorithm']['targets']} 个目标点，先用 A* 算出两两最短路，"
+            f"再用 {result['algorithm']['optimizer']} 决定访问顺序。",
+            f"最优总里程 {result['total_distance']:.0f}，按发现顺序要跑 "
+            f"{result['baseline_distance']:.0f}，节省 {result['saved_distance']:.0f}"
+            f"（{result['saved_percent']:.1f}%）。",
+            f"全程 {len(result['stops'])} 站，预计 {result['eta']:.0f} 秒跑完。",
+        ]
+        return result
+
+    def execute_ai_route(self) -> dict:
+        """接管车辆，按 AI 规划的顺序出车。"""
+        t = self.truck
+        if self.ai_mission:
+            return {"ok": False, "msg": "AI 路线正在执行中"}
+        if self.self_check["running"] or t.state == "self_check":
+            return {"ok": False, "msg": "自检进行中，请稍后再接管"}
+        plan = self.plan_ai_route()
+        if not plan.get("ok"):
+            return plan
+        if not plan["stops"]:
+            return {"ok": False, "msg": "没有可执行的目标点"}
+
+        self.ai_mission = {
+            "mode": plan["mode"],
+            "plan": plan,
+            "index": 0,
+            "visited": [],
+            "dwell": 0.0,
+            "started_at": round(self.time, 1),
+        }
+        self.stats["ai_routes"] += 1
+        t.state = "ai_mission"
+        t.spray = False
+        t.target_fire = None
+        t.target_station = None
+        self._log(f"AI 接管：{plan['mode_label']}，共 {len(plan['stops'])} 站，"
+                  f"预计 {plan['eta']:.0f} 秒", "info")
+        self._ai_goto(0)
+        return {"ok": True, "mode": plan["mode"], "mode_label": plan["mode_label"],
+                "stops": len(plan["stops"]), "total_distance": plan["total_distance"],
+                "eta": plan["eta"], "algorithm": plan["algorithm"]["name"]}
+
+    def _ai_goto(self, index: int) -> None:
+        mission = self.ai_mission
+        if not mission:
+            return
+        stops = mission["plan"]["stops"]
+        if index >= len(stops):
+            self._end_ai_mission("AI 路线全部完成")
+            return
+        mission["index"] = index
+        mission["dwell"] = 0.0
+        stop = stops[index]
+        planned = self._plan_route(stop["node"])
+        if planned is None:
+            self._log(f"AI 无法到达 {stop['label']}，跳过该目标", "critical")
+            self._advance_ai()
+            return
+
+        route, _length = planned
+        t = self.truck
+        t.state = "ai_mission"
+        t.spray = False
+        t.route = list(route)
+        t.waypoints = self._lane_waypoints(route)
+        t.wp_index = 0
+        if not t.waypoints:
+            tx, ty = self.city.road.xy[stop["node"]]
+            t.waypoints = [(tx, ty)]
+        t.target_fire = stop.get("fire_id") if stop["kind"] == "fire" else None
+        t.target_station = None
+        self._log(f"AI 导航：前往第 {index + 1}/{len(stops)} 站 {stop['label']}", "info")
+
+    def _check_ai_arrival(self) -> None:
+        mission = self.ai_mission
+        if not mission:
+            return
+        stops = mission["plan"]["stops"]
+        idx = mission["index"]
+        if idx >= len(stops):
+            self._end_ai_mission("AI 路线全部完成")
+            return
+        stop = stops[idx]
+        ax, ay = self.city.road.xy[stop["node"]]
+        t = self.truck
+        if self._dist(t.x, t.y, ax, ay) > AI_ARRIVE:
+            return
+        if stop["kind"] == "fire":
+            fire = self._fire_by_id(stop.get("fire_id"))
+            if fire is None or fire.intensity <= 0:
+                self._advance_ai(f"{stop['label']} 已无火情，继续前往下一站")
+                return
+            t.state = "extinguishing"
+            t.speed = 0.0
+            t.spray = True
+            t.target_fire = fire.id
+            self._log(f"到达 {stop['label']}，开始喷水灭火", "info")
+        else:
+            t.state = "ai_scan"
+            t.speed = 0.0
+            self._log(f"到达 {stop['label']}，正在扫描街区", "info")
+
+    def _ai_scan(self, dt: float) -> None:
+        mission = self.ai_mission
+        if not mission:
+            self._enter_idle()
+            return
+        mission["dwell"] += dt
+        if mission["dwell"] >= AI_SCAN_TIME:
+            idx = mission["index"]
+            label = mission["plan"]["stops"][idx]["label"] if idx < len(mission["plan"]["stops"]) else "巡检点"
+            self._advance_ai(f"{label} 巡检完成，未发现异常")
+
+    def _advance_ai(self, message: str = "") -> None:
+        mission = self.ai_mission
+        if not mission:
+            return
+        if message:
+            self._log(message, "info")
+        idx = mission["index"]
+        stops = mission["plan"]["stops"]
+        if 0 <= idx < len(stops):
+            mission["visited"].append(stops[idx]["order"])
+            self.stats["ai_stops"] += 1
+        self._ai_goto(idx + 1)
+
+    def _end_ai_mission(self, reason: str = "") -> None:
+        mission = self.ai_mission
+        if not mission:
+            return
+        self.ai_mission = None
+        done = len(mission["visited"])
+        total = len(mission["plan"]["stops"])
+        level = "success" if done >= total else "warning"
+        self._log(f"AI 路线结束：{reason}（完成 {done}/{total} 站）", level)
+        if self.truck.state in ("ai_mission", "ai_scan", "extinguishing"):
+            self._enter_idle()
+
+    def cancel_ai(self) -> dict:
+        if not self.ai_mission:
+            return {"ok": False, "msg": "当前没有 AI 任务"}
+        self._end_ai_mission("手动取消")
+        return {"ok": True}
+
+    def ai_status(self) -> dict:
+        """给前端的心跳字段：当前 AI 任务进度与绘制用的整条路线。"""
+        mission = self.ai_mission
+        if not mission:
+            return {
+                "active": False, "mode": None, "mode_label": None,
+                "index": 0, "total": 0, "visited": [],
+                "stops": [], "polyline": [],
+                "fires": len(self.fires),
+            }
+        plan = mission["plan"]
+        return {
+            "active": True,
+            "mode": plan["mode"],
+            "mode_label": plan["mode_label"],
+            "index": mission["index"],
+            "total": len(plan["stops"]),
+            "visited": list(mission["visited"]),
+            "total_distance": plan["total_distance"],
+            "eta": plan["eta"],
+            "stops": plan["stops"],
+            "polyline": plan["polyline"],
+            "fires": len(self.fires),
+        }
+
     # ------------------------------------------------------------------ 自检
     def start_self_check(self, reason: str = "manual", fire_id: int | None = None) -> dict:
         if self.self_check["running"]:
             return {"ok": False, "msg": "自检正在进行中"}
+        if self.ai_mission:
+            self._end_ai_mission("开始全车自检")
         t = self.truck
         t.state = "self_check"
         t.speed = 0.0
@@ -821,6 +1065,7 @@ class World:
             "obstacles": [{"id": o.id, "x": round(o.x, 1), "y": round(o.y, 1)}
                           for o in self.obstacles],
             "self_check": copy.deepcopy(self.self_check),
+            "ai": self.ai_status(),
             "events": self.events[-14:][::-1],
             "stats": dict(self.stats),
         }
