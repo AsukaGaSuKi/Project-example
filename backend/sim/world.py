@@ -7,7 +7,7 @@
 - 行驶中遇到路障，停车用机械臂清障；
 - 遇到行人自动降速慢行，行人通过后恢复；
 - 行人随机生成，走人行道、过斑马线并遵守红绿灯；
-- 路网随机刷新私家车（最多两辆），路口遇消防车停车让行、其他路段靠边避让。
+- 路网常驻四辆私家车，路口遇消防车停车让行、其他路段靠边避让。
 
 所有状态由后端统一维护，update(dt) 是唯一推进仿真时间的入口，便于测试。
 """
@@ -37,24 +37,23 @@ SELF_CHECK_STEP = 0.38   # 每个自检项目耗时
 AI_SCAN_TIME = 1.4       # AI 巡检点在点停留时间（秒）
 AI_ARRIVE = 42.0         # 判定「到达停靠点」的距离
 
-# ---- 私家车（NPC）：随机刷新，最多两辆，给消防车让行 ----
-CAR_MAX = 2              # 路网同时存在的私家车上限
+# ---- 私家车（NPC）：常驻路网，四辆，给消防车让行 ----
+CAR_MAX = 4              # 路网常驻私家车数量（不再随机刷新/消失）
 CAR_SPEED_MIN = 52.0     # 私家车巡航速度区间（比消防车慢，便于被追上时让行）
 CAR_SPEED_MAX = 68.0
 CAR_ACCEL = 90.0
 CAR_BRAKE = 160.0
 CAR_TURN = 3.2
-CAR_SPAWN_MIN = 4.0      # 两次刷新的间隔
-CAR_SPAWN_MAX = 9.0
 CAR_SPAWN_CLEAR = 90.0   # 出生点离消防车的最小距离
-CAR_ROUTE_MIN = 320.0    # 优先给私家车派一条够长的路线，避免刚刷出来就到终点
+CAR_ROUTE_MIN = 320.0    # 优先给私家车派一条够长的路线，避免刚上路就到终点
 CAR_YIELD_DIST = 150.0   # 消防车进入这个范围，私家车开始让行
 CAR_CLEAR_DIST = 190.0   # 消防车退出这个范围，让行解除（带回滞，避免抖动）
 CAR_INTERSECTION_DIST = 78.0   # 离路口多近算「在路口」
 CAR_PULL_OVER = 14.0     # 路侧避让时向路缘平移的距离
 CAR_SIDE_RATE = 26.0     # 横向平移速度
 
-CAR_COLORS = ("#e2e8f0", "#f59e0b", "#38bdf8", "#a78bfa", "#f472b6", "#34d399")
+# 车身颜色：与消防车同款的深红，只做细微深浅区分
+CAR_COLORS = ("#c8102e", "#a80f27", "#d7263d", "#9e0b1f")
 
 FAULT_NAMES = {
     "arm": "机械臂",
@@ -143,6 +142,7 @@ class NpcCar:
     state: str = "driving"          # driving / yield_intersection / yield_roadside
     side: float = 0.0               # 路侧避让时向路缘平移的距离（只影响绘制位置）
     target_node: int | None = None
+    retry: float = 0.0              # 到达终点后重选路线的冷却
 
     @property
     def yielding(self) -> bool:
@@ -255,9 +255,10 @@ class World:
             self._fault_timer = self.rng.uniform(40, 65)
         self._car_timer -= dt
         if self._car_timer <= 0:
+            # 常驻：正常情况下四辆一直在路上，只有数量不足时才补一辆
             if len(self.cars) < CAR_MAX:
                 self.spawn_car()
-            self._car_timer = self.rng.uniform(CAR_SPAWN_MIN, CAR_SPAWN_MAX)
+            self._car_timer = 3.0
 
     # ------------------------------------------------------------------ 车辆逻辑
     def _update_truck(self, dt: float) -> None:
@@ -1071,7 +1072,7 @@ class World:
 
     # ------------------------------------------------------------------ 私家车（NPC）
     def spawn_car(self) -> dict:
-        """在路网随机位置刷一辆私家车，最多同时 CAR_MAX 辆。"""
+        """在路网随机位置放一辆私家车，路上常驻 CAR_MAX 辆。"""
         if len(self.cars) >= CAR_MAX:
             return {"ok": False, "msg": f"路上最多 {CAR_MAX} 辆小车"}
         nodes = self.city.road.xy
@@ -1114,7 +1115,7 @@ class World:
         )
         self._next_car_id += 1
         self.cars.append(car)
-        self._log(f"路网随机出现一辆小车 #{car.id}（当前 {len(self.cars)}/{CAR_MAX} 辆）", "info")
+        self._log(f"小车 #{car.id} 上路（路上共 {len(self.cars)}/{CAR_MAX} 辆）", "info")
         return {"ok": True, "car_id": car.id}
 
     def _truck_busy(self) -> bool:
@@ -1122,18 +1123,37 @@ class World:
         return self.truck.state in ("to_fire", "to_refill", "to_repair", "ai_mission")
 
     def _update_cars(self, dt: float) -> None:
-        arrived: list[NpcCar] = []
         for car in self.cars:
             self._car_yield(car)
             self._car_drive(car, dt)
             if car.wp_index >= len(car.waypoints):
-                arrived.append(car)
-        for car in arrived:
-            self.cars = [c for c in self.cars if c.id != car.id]
-            self._log(f"小车 #{car.id} 抵达目的地，驶离路网", "info")
-        if arrived:
-            # 走掉一辆就尽快补一辆，路口不至于长时间空着
-            self._car_timer = min(self._car_timer, self.rng.uniform(1.5, 3.5))
+                # 常驻：到终点不停驶离，换一条随机路线继续跑
+                car.speed = 0.0
+                car.retry -= dt
+                if car.retry <= 0:
+                    car.retry = 1.0
+                    self._car_new_route(car)
+
+    def _car_new_route(self, car: NpcCar) -> bool:
+        """给常驻小车换一条新路线：从当前位置最近的节点出发，随机挑一个终点。"""
+        nodes = self.city.road.xy
+        start = self.city.nearest_road_node(car.x, car.y)
+        for _attempt in range(10):
+            goal = self.rng.randrange(len(nodes))
+            if goal == start:
+                continue
+            route = graph_astar(self.city.road.adj, start, goal, nodes)
+            if len(route) < 3:
+                continue
+            waypoints = self._lane_waypoints(route)
+            if not waypoints:
+                continue
+            car.route = route
+            car.waypoints = waypoints
+            car.wp_index = 0
+            car.target_node = goal
+            return True
+        return False
 
     def _car_yield(self, car: NpcCar) -> None:
         """让行判定：在路口就停在路口外，不在路口就靠边停车。
@@ -1230,6 +1250,7 @@ class World:
             "time": round(self.time, 1),
             "signal": self.signal,
             "signal_remaining": self.signal_remaining,
+            "car_limit": CAR_MAX,
             "truck": {
                 "x": round(t.x, 1), "y": round(t.y, 1),
                 "heading": round(t.heading, 3),
