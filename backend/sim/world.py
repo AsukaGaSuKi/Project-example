@@ -1213,10 +1213,12 @@ class World:
                     car.retry = 1.0
                     self._car_new_route(car)
 
-    def _car_new_route(self, car: NpcCar, blocked: tuple[int, ...] = ()) -> bool:
-        """给常驻小车换一条新路线：从车头前方的节点出发，尽量不掉头。
+    def _car_new_route(self, car: NpcCar, blocked: tuple[int, ...] = (),
+                       uturn: bool = False) -> bool:
+        """给常驻小车换一条新路线：默认从车头前方的节点出发，尽量不掉头。
 
-        blocked 里的节点（比如堵住的路口）不许经过。
+        blocked 里的节点（比如堵住的路口）不许经过；uturn=True 时允许掉头
+        （用于路口堵死、需要原路退出去的情况）。
         """
         nodes = self.city.road.xy
         ahead = (car.x + math.cos(car.heading) * 45.0,
@@ -1241,12 +1243,14 @@ class World:
                 continue
             if fallback is None:
                 fallback = (route, waypoints, goal)
-            # 第一段朝车尾方向（掉头）就换终点；正常左转右转都允许
-            dx, dy = waypoints[0][0] - car.x, waypoints[0][1] - car.y
-            if math.hypot(dx, dy) > 1e-3:
-                diff = abs((math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi)
-                if diff > 1.75:
-                    continue
+            # 第一段朝车尾方向（掉头）就换终点；正常左转右转都允许。
+            # 需要掉头撤离时（uturn=True）就不做这个限制。
+            if not uturn:
+                dx, dy = waypoints[0][0] - car.x, waypoints[0][1] - car.y
+                if math.hypot(dx, dy) > 1e-3:
+                    diff = abs((math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi)
+                    if diff > 1.75:
+                        continue
             self._apply_car_route(car, route, waypoints, goal)
             return True
         if fallback is not None:                   # 实在挑不到合适的，就用第一条
@@ -1270,6 +1274,14 @@ class World:
         """小车的实际绘制位置（车道位置 + 横向让行偏移）。"""
         return (car.x - math.sin(car.heading) * car.side,
                 car.y + math.cos(car.heading) * car.side)
+
+    def _in_building(self, x: float, y: float, margin: float = 8.0) -> bool:
+        """这个位置是不是压在建筑上：小车不许开进建筑。"""
+        for b in self.city.buildings:
+            if (b["x"] - margin <= x <= b["x"] + b["w"] + margin
+                    and b["y"] - margin <= y <= b["y"] + b["h"] + margin):
+                return True
+        return False
 
     def _truck_gap(self, car: NpcCar) -> tuple[float, float] | None:
         """消防车相对小车的（纵向距离, 横向偏移）；只算车头前方的车。"""
@@ -1394,8 +1406,12 @@ class World:
         if car.state == "yield_intersection":
             return 0.0
         if car.state == "yield_roadside":
-            # 先减速向路肩靠，贴边后停住，等消防车过去
-            return 0.0 if car.side >= CAR_PULL_OVER - 0.5 else min(car.cruise, 30.0)
+            # 先减速向路肩靠，贴边就停住，等消防车过去
+            if car.side >= CAR_PULL_OVER - 0.5:
+                return 0.0
+            if not self._side_ok(car, min(CAR_PULL_OVER, car.side + 1.0)):
+                return 0.0                          # 再靠就压到建筑了，就停在这儿
+            return min(car.cruise, 30.0)
         if car.state == "wait_truck":
             # 同侧前方消防车停下了：开到它后面停住，等它起步
             gap = self._truck_gap(car)
@@ -1497,8 +1513,10 @@ class World:
         nx = max(10.0, min(self.city.WIDTH - 10.0, nx))
         ny = max(10.0, min(self.city.HEIGHT - 10.0, ny))
         car.heading = (car.heading + math.pi) % (2 * math.pi) - math.pi
-        if self._would_crowd(car, nx, ny):
-            car.speed = 0.0                        # 前方没空间：原地等，不挤开别人
+        px = nx - math.sin(car.heading) * car.side
+        py = ny + math.cos(car.heading) * car.side
+        if self._would_crowd(car, nx, ny) or self._in_building(px, py):
+            car.speed = 0.0                        # 前方没空间 / 要压到建筑：原地等
             car.heading = old_heading              # 也别再打方向，免得原地打转
         else:
             car.x, car.y = nx, ny
@@ -1527,10 +1545,12 @@ class World:
             car.side = candidate
 
     def _side_ok(self, car: NpcCar, new_side: float) -> bool:
-        """横移这一步会不会挤到消防车 / 其它小车。"""
+        """横移这一步会不会挤到别人 / 压到建筑。"""
         px = car.x - math.sin(car.heading) * new_side
         py = car.y + math.cos(car.heading) * new_side
         cx, cy = self._car_drawn_xy(car)
+        if self._in_building(px, py):
+            return False                           # 小车不许开进建筑
         if self._truck_crowds(px, py) and self._closer(px, py, cx, cy, self.truck.x, self.truck.y):
             return False
         for other in self.cars:
@@ -1750,16 +1770,21 @@ class World:
             if math.hypot(gx - nx, gy - ny) < 150:
                 continue
             path = self.city.ped_route(start, goal)
-            if len(path) >= 2:
-                ped.path = path
-                ped.idx = 1
-                ped.waiting = False
-                ped.state = "leaving"
-                return True
+            if len(path) < 2:
+                continue
+            # 新路线也不能再穿过这个堵住的路口
+            if any(math.hypot(px - nx, py - ny) < 60 for px, py in
+                   (self.city.ped.xy[n] for n in path[1:])):
+                continue
+            ped.path = path
+            ped.idx = 1
+            ped.waiting = False
+            ped.state = "leaving"
+            return True
         return False
 
     def _reroute_cars_around(self, node: int) -> int:
-        """让堵在路口附近的小车绕开这个路口重新找路。"""
+        """让堵在路口附近的小车掉头、换一条绕开这个路口的路线。"""
         nx, ny = self.city.road.xy[node]
         count = 0
         for car in self.cars:
@@ -1767,7 +1792,7 @@ class World:
             if math.hypot(x - nx, y - ny) > 145:
                 continue
             car.retry = 0.0
-            if self._car_new_route(car, blocked=(node,)):
+            if self._car_new_route(car, blocked=(node,), uturn=True):
                 count += 1
         return count
 

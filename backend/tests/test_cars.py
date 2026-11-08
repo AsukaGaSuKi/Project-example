@@ -436,6 +436,27 @@ def test_消防车在车流中故障_先让小车走再回维修站():
     assert w.truck.fault == "pump"
 
 
+def test_小车不会开进建筑():
+    for seed in (81, 82):
+        w = World(auto_spawn=True, seed=seed)
+        bad = 0
+        for _ in range(900):                      # 90 秒
+            w.update(0.1)
+            for car in w.cars:
+                x, y = drawn(w, car)
+                if w._in_building(x, y, margin=0):
+                    bad += 1
+        assert bad == 0, (seed, bad)
+
+
+def test_堵住时允许小车掉头换路():
+    w = make_world()
+    car = add_car(w, 154.0, 320.0, -math.pi / 2, [(154.0, 150.0)])
+    # 车头朝北，正常路线都在身后；允许掉头后一定能拿到一条新路线
+    assert w._car_new_route(car, blocked=(), uturn=True)
+    assert car.waypoints
+
+
 # ---------------------------------------------------------------- 状态导出
 def test_状态里带上三辆小车的绘制字段():
     w = World(auto_spawn=True, seed=14)
