@@ -523,13 +523,13 @@ function drawCar(c){
 
 function drawPed(p){
   ctx.save();
-  ctx.font = '23px ' + EMOJI_FONT;
+  ctx.font = '13px ' + EMOJI_FONT;
   ctx.textAlign='center'; ctx.textBaseline='middle';
   ctx.fillText(p.emoji || '🚶', p.x, p.y);
   if (p.state === 'waiting'){
-    ctx.font = '11px ' + EMOJI_FONT;
+    ctx.font = '8px ' + EMOJI_FONT;
     ctx.fillStyle = '#fbbf24';
-    ctx.fillText('⏳', p.x+13, p.y-17);
+    ctx.fillText('⏳', p.x+8, p.y-11);
   }
   ctx.restore();
 }
