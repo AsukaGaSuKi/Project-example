@@ -105,9 +105,9 @@ def body_overlaps(world):
 
 
 # ---------------------------------------------------------------- 常驻规则
-def test_启动就常驻三辆小车():
+def test_启动就常驻两辆小车():
     w = World(auto_spawn=True, seed=11)
-    assert len(w.cars) == CAR_MAX == 3
+    assert len(w.cars) == CAR_MAX == 2
     assert w.spawn_car()["ok"] is False
 
 
@@ -458,7 +458,7 @@ def test_堵住时允许小车掉头换路():
 
 
 # ---------------------------------------------------------------- 状态导出
-def test_状态里带上三辆小车的绘制字段():
+def test_状态里带上两辆小车的绘制字段():
     w = World(auto_spawn=True, seed=14)
     cars = w.get_state()["cars"]
     assert len(cars) == CAR_MAX
