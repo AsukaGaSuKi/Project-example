@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from sim.world import (  # noqa: E402
     World, NpcCar, BASE_SPEED, CAR_MAX, CAR_PULL_OVER, CAR_COLORS,
-    CAR_CAR_GAP, CAR_MIN_GAP,
+    CAR_CAR_GAP, CAR_MIN_GAP, CAR_WAIT_GAP,
 )
 
 N150 = (170.0, 150.0)
@@ -158,22 +158,43 @@ def test_消防车通过后小车恢复行驶():
     assert car.side < 0.01                    # 回到车道中心
 
 
-# ---------------------------------------------------------------- 借道绕行
-def test_停着的消防车在前方_小车借道绕行():
+# ---------------------------------------------------------------- 同侧等待
+def test_同侧前方消防车停下_小车停车等待():
     w = make_world()
     car = add_car(w, 154.0, 215.0, math.pi / 2,
                   [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
-    park_truck(w, 154.0, 300.0, state="idle")  # 停在小车正前方的车道上
-    advance(w, 0.4)
-    assert car.state == "bypass"               # 接近时就决定借道
+    park_truck(w, 154.0, 300.0, state="idle")  # 同侧同向，停在小车前面
+    advance(w, 4.0)
 
-    advance(w, 1.6)
-    assert car.side < -1.0                     # 已经借到对向车道
-    assert math.hypot(*[a - b for a, b in zip(drawn(w, car),
-                                              (w.truck.x, w.truck.y))]) >= CAR_MIN_GAP - 0.5
+    assert car.state == "wait_truck"
+    assert car.speed == 0.0
+    assert car.y < 300.0                       # 停在消防车后面，没有超过去
+    assert 300.0 - car.y <= CAR_WAIT_GAP + 40   # 停得比较近，但不是撞上去
 
 
-def test_补水与维修时也不和消防车重叠():
+def test_消防车重新起步后小车跟上():
+    w = make_world()
+    car = add_car(w, 154.0, 215.0, math.pi / 2,
+                  [(154.0, 265.0), (154.0, 380.0)], route_keys=(N150, N265, N380))
+    park_truck(w, 154.0, 300.0, state="idle")
+    advance(w, 4.0)
+    assert car.state == "wait_truck"
+
+    # 消防车重新起步出车
+    dispatch_truck(w, 154.0, 300.0)
+    w.truck.waypoints = [(154.0, 300.0), (154.0, 500.0), (154.0, 620.0)]
+    w.truck.wp_index = 0
+
+    saw_driving = False
+    for _ in range(60):                        # 6 秒
+        w.update(0.1)
+        if car.state == "driving" and car.speed > 10.0:
+            saw_driving = True
+    assert saw_driving                         # 曾经起步跟上
+    assert car.y > 260.0                       # 确实往前开了，没有卡在原地
+
+
+def test_补水与维修时小车在消防车后面等待且不重叠():
     for state in ("refilling", "repairing"):
         w = make_world()
         car = add_car(w, 154.0, 180.0, math.pi / 2,
@@ -187,7 +208,8 @@ def test_补水与维修时也不和消防车重叠():
             cx, cy = drawn(w, car)
             min_gap = min(min_gap, math.hypot(cx - w.truck.x, cy - w.truck.y))
         assert min_gap >= CAR_MIN_GAP - 0.5, (state, min_gap)
-        assert car.y > 300.0                       # 已经从旁边绕过去
+        assert car.y < 265.0                       # 一直等在消防车后面，没有绕过去
+        assert car.state in ("wait_truck", "driving")
 
 
 def test_小车之间也不重叠():

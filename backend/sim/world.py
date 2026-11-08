@@ -7,7 +7,7 @@
 - 行驶中遇到路障，停车用机械臂清障；
 - 遇到行人自动降速慢行，行人通过后恢复；
 - 行人随机生成，走人行道、过斑马线并遵守红绿灯；
-- 路网常驻四辆私家车：路口让行、靠边避让、借道绕行，任何时候都与消防车和其它小车保持间距。
+- 路网常驻四辆私家车：路口让行、靠边避让、同侧排队等消防车起步，任何时候都不重叠。
 
 所有状态由后端统一维护，update(dt) 是唯一推进仿真时间的入口，便于测试。
 """
@@ -50,7 +50,7 @@ CAR_YIELD_DIST = 150.0   # 消防车进入这个范围，私家车开始让行
 CAR_CLEAR_DIST = 190.0   # 消防车退出这个范围，让行解除（带回滞，避免抖动）
 CAR_INTERSECTION_DIST = 78.0   # 离路口多近算「在路口」
 CAR_PULL_OVER = 30.0     # 让行时向路肩平移的距离（消防车很宽，要让到路肩才不重叠）
-CAR_BYPASS = 36.0        # 绕行停着的消防车时，向对向车道平移的距离
+CAR_WAIT_GAP = 52.0      # 同侧等消防车时，停在它后面的距离
 CAR_MIN_GAP = 34.0       # 小车与消防车中心的最小间距（硬约束，杜绝重叠）
 CAR_CAR_GAP = 30.0       # 两辆小车中心的最小间距（硬约束，杜绝重叠）
 CAR_SIDE_RATE = 26.0     # 横向平移速度
@@ -1169,45 +1169,62 @@ class World:
         return (car.x - math.sin(car.heading) * car.side,
                 car.y + math.cos(car.heading) * car.side)
 
+    def _truck_gap(self, car: NpcCar) -> tuple[float, float] | None:
+        """消防车相对小车的（纵向距离, 横向偏移）；只算车头前方的车。"""
+        cx, cy = self._car_drawn_xy(car)
+        dx, dy = self.truck.x - cx, self.truck.y - cy
+        dist = math.hypot(dx, dy)
+        if dist < 1e-3:
+            return None
+        rel = (math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi
+        longi = dist * math.cos(rel)
+        if longi <= 0:
+            return None
+        return longi, abs(dist * math.sin(rel))
+
     def _car_yield(self, car: NpcCar) -> None:
         """让行判定：目标是「两车任何时候都不重叠」。
 
         - 消防车迎面开来 / 从后方追上来：小车靠到路肩停下，等它过去；
-        - 消防车在前方同车道（停着补水、维修、灭火，或走得比小车慢）：借对向车道绕过去；
+        - 同侧同向、消防车在前面因为补水 / 维修 / 灭火等原因停下：
+          小车停到它后面等着，消防车重新起步后再跟着走；
         - 前方就是路口且消防车正在出车：停在路口外，让它先过；
         - 消防车在另一条路上（横向错开）：各走各的，不用让。
         """
         cx, cy = self._car_drawn_xy(car)
-        dx, dy = self.truck.x - cx, self.truck.y - cy
-        dist = math.hypot(dx, dy)
+        dist = self._dist(cx, cy, self.truck.x, self.truck.y)
         limit = CAR_CLEAR_DIST if car.yielding else CAR_YIELD_DIST
         if dist > limit:
             car.state = "driving"
             return
 
-        rel = (math.atan2(dy, dx) - car.heading + math.pi) % (2 * math.pi) - math.pi
-        ahead_dist = dist * math.cos(rel)          # > 0：在车头前方
-        side_dist = abs(dist * math.sin(rel))      # 横向错开的距离
-        if side_dist > 36:
-            car.state = "driving"                  # 不在同一车道上，互不相干
+        gap = self._truck_gap(car)
+        if gap is None:
+            # 消防车在侧后方：只有它还在出车、会追上来时才靠边让行
+            car.state = "yield_roadside" if self._truck_busy() else "driving"
             return
 
-        if ahead_dist > 10:
-            if self._truck_oncoming(car):
-                car.state = "yield_roadside"       # 迎面来车：靠边停，让出车道
-            elif self._truck_busy() and self._intersection_ahead(car) is not None:
-                car.state = "yield_intersection"   # 路口：停在路口外等它先过
-            elif not self._truck_busy() or self.truck.speed < 20:
-                car.state = "bypass"               # 前方有停着的消防车：借道绕行
-            else:
-                car.state = "driving"              # 它在前方且比小车快：跟着走
+        ahead_dist, side_dist = gap
+        if side_dist > 36 or ahead_dist < 10:
+            car.state = "driving"                  # 不在同一车道，互不相干
+            return
+
+        if self._truck_oncoming(car):
+            car.state = "yield_roadside"           # 迎面来车：靠边停，让出车道
+        elif self._truck_busy() and self._truck_in_intersection(car):
+            car.state = "yield_intersection"       # 路口：停在路口外等它先过
+        elif self.truck.speed < 5:
+            car.state = "wait_truck"               # 同侧、消防车停下了：排队等它起步
         else:
-            if self._truck_busy():
-                car.state = "yield_roadside"       # 从后方追上来：靠边让行
-            elif car.state == "bypass" and ahead_dist > -40:
-                car.state = "bypass"               # 还没完全超过去，继续借道
-            else:
-                car.state = "driving"
+            car.state = "driving"                  # 同侧、它还在走：跟着走
+
+    def _truck_in_intersection(self, car: NpcCar) -> bool:
+        """小车快到路口，而且消防车正接近 / 通过同一个路口。"""
+        node = self._intersection_ahead(car)
+        if node is None:
+            return False
+        nx, ny = self.city.road.xy[node]
+        return self._dist(self.truck.x, self.truck.y, nx, ny) < 100.0
 
     def _intersection_ahead(self, car: NpcCar) -> int | None:
         """车辆正前方最近的路口；只有进入 CAR_INTERSECTION_DIST 才算「在路口」。"""
@@ -1221,12 +1238,8 @@ class World:
         return None
 
     def _car_target_side(self, car: NpcCar) -> float:
-        """让行时的横向目标：+ 靠路肩、- 借对向车道。"""
-        if car.state == "yield_roadside":
-            return CAR_PULL_OVER
-        if car.state == "bypass":
-            return -CAR_BYPASS
-        return 0.0
+        """让行时的横向目标：+ 靠路肩，其余情况走车道中心。"""
+        return CAR_PULL_OVER if car.state == "yield_roadside" else 0.0
 
     def _car_target_speed(self, car: NpcCar) -> float:
         if car.state == "yield_intersection":
@@ -1234,8 +1247,16 @@ class World:
         if car.state == "yield_roadside":
             # 先减速向路肩靠，贴边后停住
             return 0.0 if car.side >= CAR_PULL_OVER - 0.5 else min(car.cruise, 30.0)
-        if car.state == "bypass":
-            return min(car.cruise, 42.0)          # 借道时减速通过
+        if car.state == "wait_truck":
+            # 同侧前方消防车停下了：开到它后面停住，等它起步
+            gap = self._truck_gap(car)
+            if gap is None or gap[0] < CAR_WAIT_GAP:
+                return 0.0
+            return min(car.cruise, 28.0)
+        gap = self._truck_gap(car)
+        if gap is not None and gap[1] < 36 and gap[0] < 120:
+            # 同侧前方是行驶中的消防车：按它的车速跟车，保持车距
+            return min(car.cruise, max(self.truck.speed, 0.0))
         return car.cruise
 
     def _car_drive(self, car: NpcCar, dt: float) -> None:

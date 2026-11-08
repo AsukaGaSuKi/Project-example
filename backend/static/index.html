@@ -506,8 +506,8 @@ function drawCar(c){
   if (yielding){
     const badge = c.state === 'yield_intersection'
       ? { text: '路口让行', bg: 'rgba(251,191,36,.92)' }
-      : c.state === 'bypass'
-      ? { text: '借道绕行', bg: 'rgba(56,189,248,.92)' }
+      : c.state === 'wait_truck'
+      ? { text: '停车等待', bg: 'rgba(248,113,113,.92)' }
       : { text: '路侧避让', bg: 'rgba(52,211,153,.92)' };
     ctx.save();
     ctx.fillStyle = badge.bg;
