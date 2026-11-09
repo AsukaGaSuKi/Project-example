@@ -101,6 +101,7 @@ class Truck:
     water: float = 100.0
     battery: float = 100.0
     u_turn: bool = False     # 正在原地掉头
+    goal_node: int | None = None   # 当前路线的目标节点，供重新规划用
     state: str = "idle"
     route: list[int] = field(default_factory=list)
     waypoints: list[tuple[float, float]] = field(default_factory=list)
@@ -200,6 +201,7 @@ class World:
         self.jam: dict | None = None
         self.clear_way: dict | None = None
         self._truck_stuck = 0.0
+        self._ped_block_timer = 0.0
         self._jam_watch: dict[int, float] = {}
         self._jam_clear_timer = 0.0
         self._next_fire_id = 1
@@ -266,6 +268,7 @@ class World:
         self._update_truck(dt)
         self._update_cars(dt)
         self._update_clear_way(dt)
+        self._update_ped_block(dt)
         self._update_jam(dt)
         if self.auto_spawn:
             self._update_spawners(dt)
@@ -599,6 +602,7 @@ class World:
 
     def _set_route(self, route: list[int], node: int) -> None:
         t = self.truck
+        t.goal_node = node
         t.route = list(route)
         t.waypoints = self._lane_waypoints(route)
         entry = self._lane_entry(route)
@@ -1709,6 +1713,52 @@ class World:
             return 0.0
         return max(0.0, lead_speed * (gap - CAR_CAR_LEN) / (safe - CAR_CAR_LEN))
 
+    # ------------------------------------------------------------------ 被行人堵住
+    def _update_ped_block(self, dt: float) -> None:
+        """消防车被行人顶住：先让行人反方向走开，再重新规划路线继续执行。"""
+        t = self.truck
+        if t.state not in ("to_fire", "to_refill", "to_repair", "ai_mission") or t.speed > 1:
+            self._ped_block_timer = 0.0
+            return
+        near = [p for p in self.pedestrians
+                if math.hypot(p.x - t.x, p.y - t.y) < 70]
+        if not near:
+            self._ped_block_timer = 0.0
+            return
+        self._ped_block_timer += dt
+        if self._ped_block_timer < 2.5:
+            return
+        self._ped_block_timer = 0.0
+        moved = 0
+        for ped in near:
+            if self._ped_reverse(ped):
+                moved += 1
+        replanned = self._replan_truck()
+        if moved or replanned:
+            self._log(f"消防车被 {moved} 名行人挡住：行人往反方向走开，"
+                      f"消防车重新规划路线继续执行", "warning")
+
+    def _ped_reverse(self, ped: Pedestrian) -> bool:
+        """行人原地掉头，沿原路往回走。"""
+        back = list(reversed(ped.path[:ped.idx + 1])) if ped.idx < len(ped.path) else []
+        if len(back) < 2:
+            return False
+        ped.path = back
+        ped.idx = 1
+        ped.waiting = False
+        ped.state = "leaving"
+        return True
+
+    def _replan_truck(self) -> bool:
+        """按当前目标节点重新规划一条路线。"""
+        t = self.truck
+        if t.goal_node is None:
+            return False
+        planned = self._plan_route(t.goal_node)
+        if planned is None:
+            return False
+        self._set_route(planned[0], t.goal_node)
+        return True
     # ------------------------------------------------------------------ 消防车被堵 / 故障
     def _update_clear_way(self, dt: float) -> None:
         """消防车被小车堵住、或在车流里故障：先让小车走，再让消防车回去修。"""

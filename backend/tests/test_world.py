@@ -219,3 +219,24 @@ def test_行人过街只走斑马线():
             if min(dx, dy) < 36:
                 road_in += 1
     assert road_in == 0
+def test_消防车被行人挡住_行人反方向走开并重新规划():
+    import math as _m
+    w = make_world(seed=31)
+    n380 = w.city.road_nodes[(170.0, 380.0)]
+    t = w.truck
+    t.state = "ai_mission"
+    t.x, t.y = 170.0, 300.0
+    t.heading = _m.pi / 2
+    t.speed = 0.0
+    t.waypoints = [(154.0, 380.0)]
+    t.wp_index = 0
+    t.goal_node = n380
+    ped = w.pedestrians[0]
+    ped.x, ped.y = 172.0, 335.0
+    ped.speed = 0.0
+    w.pedestrians = [ped]
+
+    for _ in range(30):                        # 3 秒
+        w.update(0.1)
+    assert ped.state == "leaving"              # 行人被要求往回走
+    assert any("反方向" in e["text"] and "重新规划" in e["text"] for e in w.events)
